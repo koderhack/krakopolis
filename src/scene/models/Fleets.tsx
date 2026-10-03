@@ -94,12 +94,27 @@ class BoardPool {
 const TRAM = { len: 21.4, wid: 2.44, lowH: 1.35, upH: 1.25, roofH: 0.26, floor: 0.5 };
 const BUS = { len: 12.0, wid: 2.55, lowH: 1.5, upH: 1.05, floor: 0.45 };
 
-export function TramFleet({ get, capacity = 200, onPick, selected }: {
-  get: () => FleetPose[]; capacity?: number; onPick?: (i: number) => void; selected?: string | null;
+/** Intensywność świateł pojazdów: 0 w dzień, 1 w głębokiej nocy. */
+function vehicleNightGlow(dayFactor: number): number {
+  const night = Math.max(0, 1 - dayFactor);
+  if (night < 0.32) return 0;
+  return Math.min(1, (night - 0.32) / 0.5);
+}
+
+function makeGlowMat(color: string) {
+  return new THREE.MeshBasicMaterial({
+    color, transparent: true, opacity: 0, toneMapped: false, depthWrite: false,
+  });
+}
+
+export function TramFleet({ get, sim, capacity = 200, onPick, selected }: {
+  get: () => FleetPose[]; sim: Sim; capacity?: number; onPick?: (i: number) => void; selected?: string | null;
 }) {
   const group = useRef<THREE.Group>(null);
   const poses = useRef<FleetPose[]>([]);
   const pool = useMemo(() => new BoardPool(), []);
+  const hlMat = useMemo(() => makeGlowMat('#fff2c4'), []);
+  const tlMat = useMemo(() => makeGlowMat('#ff3b2e'), []);
   const parts = useMemo(() => {
     const body = new THREE.MeshStandardMaterial({ color: '#f2f0e6', roughness: 0.5, metalness: 0.08 });
     const glass = new THREE.MeshStandardMaterial({ color: '#16222b', roughness: 0.15, metalness: 0.6 });
@@ -117,16 +132,25 @@ export function TramFleet({ get, capacity = 200, onPick, selected }: {
       panto: mk(new THREE.BoxGeometry(2.8, 0.08, 0.08), steel, capacity, false),
       panto2: mk(new THREE.BoxGeometry(1.6, 0.08, 1.05), steel, capacity, false),
       bogie: mk(new THREE.BoxGeometry(2.7, 0.46, W * 0.86), tyre, capacity, false),
+      hlL: mk(new THREE.BoxGeometry(0.28, 0.22, 0.38), hlMat, capacity, false),
+      hlR: mk(new THREE.BoxGeometry(0.28, 0.22, 0.38), hlMat, capacity, false),
+      tlL: mk(new THREE.BoxGeometry(0.2, 0.18, 0.28), tlMat, capacity, false),
+      tlR: mk(new THREE.BoxGeometry(0.2, 0.18, 0.28), tlMat, capacity, false),
     };
-  }, [capacity]);
+  }, [capacity, hlMat, tlMat]);
 
-  useFrame(() => {
+  const glowAcc = useRef(0);
+  useFrame((_, dt) => {
     if (group.current && !pool.scene) pool.attach(group.current);
     const list = get();
     poses.current = list;
     const L = TRAM.len, fy = TRAM.floor + TRAM.lowH / 2;
+    const half = L * 0.5 - 0.12;
+    const side = TRAM.wid * 0.38;
+    const ly = TRAM.floor + 0.55;
     list.forEach((p, i) => {
-      const cx = Math.cos(p.yaw), sz = -Math.sin(p.yaw);
+      const fx = Math.cos(p.yaw), fz = -Math.sin(p.yaw);
+      const rx = Math.sin(p.yaw), rz = Math.cos(p.yaw);
       put(parts.low, i, p.x, fy, p.z, p.yaw);
       put(parts.up, i, p.x, TRAM.floor + TRAM.lowH + TRAM.upH / 2 - 0.04, p.z, p.yaw);
       put(parts.glass, i, p.x, TRAM.floor + TRAM.lowH + TRAM.upH * 0.46, p.z, p.yaw);
@@ -135,14 +159,27 @@ export function TramFleet({ get, capacity = 200, onPick, selected }: {
       put(parts.roof, i, p.x, TRAM.floor + TRAM.lowH + TRAM.upH + 0.07, p.z, p.yaw);
       put(parts.panto, i, p.x, TRAM.floor + TRAM.lowH + TRAM.upH + 0.26, p.z, p.yaw);
       put(parts.panto2, i, p.x, TRAM.floor + TRAM.lowH + TRAM.upH + 0.4, p.z, p.yaw);
-      put(parts.bogie, i, p.x + cx * L * 0.31, 0.24, p.z + sz * L * 0.31, p.yaw);
-      put(parts.bogie, i + list.length, p.x - cx * L * 0.31, 0.24, p.z - sz * L * 0.31, p.yaw);
+      put(parts.bogie, i, p.x + fx * L * 0.31, 0.24, p.z + fz * L * 0.31, p.yaw);
+      put(parts.bogie, i + list.length, p.x - fx * L * 0.31, 0.24, p.z - fz * L * 0.31, p.yaw);
+      put(parts.hlL, i, p.x + fx * half + rx * side, ly, p.z + fz * half + rz * side, p.yaw);
+      put(parts.hlR, i, p.x + fx * half - rx * side, ly, p.z + fz * half - rz * side, p.yaw);
+      put(parts.tlL, i, p.x - fx * half + rx * side, ly, p.z - fz * half + rz * side, p.yaw);
+      put(parts.tlR, i, p.x - fx * half - rx * side, ly, p.z - fz * half - rz * side, p.yaw);
     });
     for (const k in parts) parts[k as keyof typeof parts].count = k === 'bogie' ? list.length * 2 : list.length;
     flush(...Object.values(parts));
     pool.render(list, (i, p, mesh) => {
       put(mesh, i, p.x + Math.cos(p.yaw) * (L / 2 + 0.07), 3.3, p.z - Math.sin(p.yaw) * (L / 2 + 0.07), p.yaw, 1.45, 0.72, 1);
     });
+
+    glowAcc.current += dt;
+    if (glowAcc.current >= 0.12) {
+      glowAcc.current = 0;
+      const g = vehicleNightGlow(sim.dayFactor());
+      hlMat.opacity = g * 0.95;
+      tlMat.opacity = g * 0.85;
+      hlMat.visible = tlMat.visible = g > 0.02;
+    }
   });
 
   const click = (e: ThreeEvent<MouseEvent>) => {
@@ -159,9 +196,13 @@ export function TramFleet({ get, capacity = 200, onPick, selected }: {
   );
 }
 
-export function BusFleet({ get, capacity = 240, onPick }: { get: () => FleetPose[]; capacity?: number; onPick?: (i: number) => void }) {
+export function BusFleet({ get, sim, capacity = 240, onPick }: {
+  get: () => FleetPose[]; sim: Sim; capacity?: number; onPick?: (i: number) => void;
+}) {
   const group = useRef<THREE.Group>(null);
   const pool = useMemo(() => new BoardPool(), []);
+  const hlMat = useMemo(() => makeGlowMat('#fff2c4'), []);
+  const tlMat = useMemo(() => makeGlowMat('#ff3b2e'), []);
   const parts = useMemo(() => {
     const body = new THREE.MeshStandardMaterial({ color: '#f4f2ea', roughness: 0.45, metalness: 0.06 });
     const glass = new THREE.MeshStandardMaterial({ color: '#18242c', roughness: 0.16, metalness: 0.55 });
@@ -175,28 +216,50 @@ export function BusFleet({ get, capacity = 240, onPick }: { get: () => FleetPose
       accent: mk(new THREE.BoxGeometry(L * 0.99, 0.18, W * 1.014), new THREE.MeshStandardMaterial({ color: '#c8342c', roughness: 0.6 }), capacity, false),
       skirt: mk(new THREE.BoxGeometry(L * 0.86, 0.46, W * 0.82), skirt, capacity, false),
       wheels: mk(new THREE.BoxGeometry(2.5, 0.8, W * 1.02), tyre, capacity, false),
+      hlL: mk(new THREE.BoxGeometry(0.26, 0.2, 0.36), hlMat, capacity, false),
+      hlR: mk(new THREE.BoxGeometry(0.26, 0.2, 0.36), hlMat, capacity, false),
+      tlL: mk(new THREE.BoxGeometry(0.2, 0.16, 0.28), tlMat, capacity, false),
+      tlR: mk(new THREE.BoxGeometry(0.2, 0.16, 0.28), tlMat, capacity, false),
     };
-  }, [capacity]);
+  }, [capacity, hlMat, tlMat]);
 
-  useFrame(() => {
+  const glowAcc = useRef(0);
+  useFrame((_, dt) => {
     if (group.current && !pool.scene) pool.attach(group.current);
     const list = get();
     const L = BUS.len;
+    const half = L * 0.5 - 0.1;
+    const side = BUS.wid * 0.4;
+    const ly = BUS.floor + 0.5;
     list.forEach((p, i) => {
-      const cx = Math.cos(p.yaw), sz = -Math.sin(p.yaw);
+      const fx = Math.cos(p.yaw), fz = -Math.sin(p.yaw);
+      const rx = Math.sin(p.yaw), rz = Math.cos(p.yaw);
       put(parts.low, i, p.x, BUS.floor + BUS.lowH / 2, p.z, p.yaw);
-      put(parts.up, i, p.x - cx * L * 0.05, BUS.floor + BUS.lowH + BUS.upH / 2 - 0.03, p.z - sz * L * 0.05, p.yaw);
+      put(parts.up, i, p.x - fx * L * 0.05, BUS.floor + BUS.lowH + BUS.upH / 2 - 0.03, p.z - fz * L * 0.05, p.yaw);
       put(parts.glass, i, p.x, BUS.floor + BUS.lowH + BUS.upH * 0.46, p.z, p.yaw);
       put(parts.accent, i, p.x, BUS.floor + BUS.lowH * 0.34, p.z, p.yaw);
       put(parts.skirt, i, p.x, BUS.floor - 0.02, p.z, p.yaw);
-      put(parts.wheels, i, p.x + cx * L * 0.33, 0.4, p.z + sz * L * 0.33, p.yaw);
-      put(parts.wheels, i + list.length, p.x - cx * L * 0.33, 0.4, p.z - sz * L * 0.33, p.yaw);
+      put(parts.wheels, i, p.x + fx * L * 0.33, 0.4, p.z + fz * L * 0.33, p.yaw);
+      put(parts.wheels, i + list.length, p.x - fx * L * 0.33, 0.4, p.z - fz * L * 0.33, p.yaw);
+      put(parts.hlL, i, p.x + fx * half + rx * side, ly, p.z + fz * half + rz * side, p.yaw);
+      put(parts.hlR, i, p.x + fx * half - rx * side, ly, p.z + fz * half - rz * side, p.yaw);
+      put(parts.tlL, i, p.x - fx * half + rx * side, ly, p.z - fz * half + rz * side, p.yaw);
+      put(parts.tlR, i, p.x - fx * half - rx * side, ly, p.z - fz * half - rz * side, p.yaw);
     });
     for (const k in parts) parts[k as keyof typeof parts].count = k === 'wheels' ? list.length * 2 : list.length;
     flush(...Object.values(parts));
     pool.render(list, (i, p, mesh) => {
       put(mesh, i, p.x + Math.cos(p.yaw) * (L / 2 + 0.06), 2.9, p.z - Math.sin(p.yaw) * (L / 2 + 0.06), p.yaw, 1.15, 0.58, 1);
     });
+
+    glowAcc.current += dt;
+    if (glowAcc.current >= 0.12) {
+      glowAcc.current = 0;
+      const g = vehicleNightGlow(sim.dayFactor());
+      hlMat.opacity = g * 0.95;
+      tlMat.opacity = g * 0.85;
+      hlMat.visible = tlMat.visible = g > 0.02;
+    }
   });
 
   const click = (e: ThreeEvent<MouseEvent>) => {
@@ -213,9 +276,7 @@ export function BusFleet({ get, capacity = 240, onPick }: { get: () => FleetPose
 }
 
 export function CarFleet({ get, sim, capacity = 320 }: { get: () => FleetPose[]; sim: Sim; capacity?: number }) {
-  const hlMat = useMemo(() => new THREE.MeshBasicMaterial({
-    color: '#fff2c4', transparent: true, opacity: 0, toneMapped: false, depthWrite: false,
-  }), []);
+  const hlMat = useMemo(() => makeGlowMat('#fff2c4'), []);
   const parts = useMemo(() => ({
     low: mk(new RoundedBoxGeometry(4.3, 0.92, 1.84, 2, 0.22), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.32, metalness: 0.3 }), capacity),
     cab: mk(new RoundedBoxGeometry(2.2, 0.8, 1.7, 2, 0.24), new THREE.MeshStandardMaterial({ color: '#1d242b', roughness: 0.2, metalness: 0.5 }), capacity),
@@ -228,8 +289,7 @@ export function CarFleet({ get, sim, capacity = 320 }: { get: () => FleetPose[];
   useFrame((_, dt) => {
     const list = get();
     const PAL = ['#d9d4c7', '#2f3640', '#b3262e', '#3b6ea5', '#e0b23a', '#6b7f6a', '#8a8f98', '#4a4f57', '#e8e6df'];
-    const night = Math.max(0, 1 - sim.dayFactor());
-    const glow = night < 0.32 ? 0 : Math.min(1, (night - 0.32) / 0.5);
+    const glow = vehicleNightGlow(sim.dayFactor());
     list.forEach((p, i) => {
       const fx = Math.cos(p.yaw), fz = -Math.sin(p.yaw);
       const rx = Math.sin(p.yaw), rz = Math.cos(p.yaw);

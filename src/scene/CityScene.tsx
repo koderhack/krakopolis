@@ -716,8 +716,8 @@ function RealFleet({ sim, onPick, selected, layers }: {
   });
   return (
     <group>
-      <TramFleet get={get.trams} onPick={(i) => onPick(trams[i]?.id ?? '', 'tram')} selected={selected} />
-      <BusFleet get={get.buses} onPick={(i) => onPick(buses[i]?.id ?? '', 'bus')} />
+      <TramFleet get={get.trams} sim={sim} onPick={(i) => onPick(trams[i]?.id ?? '', 'tram')} selected={selected} />
+      <BusFleet get={get.buses} sim={sim} onPick={(i) => onPick(buses[i]?.id ?? '', 'bus')} />
       <ObservedMarkers get={get.trams} />
       <ObservedMarkers get={get.buses} />
     </group>
@@ -764,8 +764,8 @@ function SimFleet({ sim, layers }: { sim: Sim; layers: Set<string> }) {
     <group>
       {layers.has('transit') && (
         <>
-          <TramFleet get={get.trams} />
-          <BusFleet get={get.buses} />
+          <TramFleet get={get.trams} sim={sim} />
+          <BusFleet get={get.buses} sim={sim} />
         </>
       )}
       {layers.has('traffic') && <CarFleet get={get.cars} sim={sim} />}
