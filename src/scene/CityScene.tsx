@@ -152,7 +152,7 @@ function DayNight({ sim }: { sim: Sim }) {
 
 /**
  * Obsługa kamery (klasyczne OrbitControls):
- * LPM = obrót, PPM / środkowy = przesuwanie, Shift+PPM = pochylenie, scroll = zoom.
+ * LPM = przesuwanie, PPM / środkowy = obrót, Shift+PPM = pochylenie, scroll = zoom.
  * Jednym źródłem prawdy jest `OrbitControls.target`.
  */
 function Rig({
@@ -366,11 +366,11 @@ function Rig({
       zoomSpeed={0.85} rotateSpeed={0.55} panSpeed={1.05}
       screenSpacePanning={false}
       mouseButtons={{
-        LEFT: THREE.MOUSE.ROTATE,
-        MIDDLE: THREE.MOUSE.PAN,
-        RIGHT: THREE.MOUSE.PAN,
+        LEFT: THREE.MOUSE.PAN,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.ROTATE,
       }}
-      touches={{ ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }}
+      touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE }}
       target={[focus[0], 0, focus[1]]}
       onStart={() => { tween.current = null; ctl.current && (ctl.current.enabled = true); }}
     />
@@ -378,13 +378,14 @@ function Rig({
 }
 
 /** Niebieski podgląd miejsca ustawienia obiektu. */
-function Ghost({ kind, buildId, roadFrom, onCommit, rot, pendingPose }: {
+function Ghost({ kind, buildId, roadFrom, onCommit, rot, pendingPose, sim }: {
   kind: PlaceKind | null;
   buildId?: import('../simulation/city/catalog').BuildId | null;
   roadFrom: { x: number; z: number } | null;
   onCommit: CitySceneProps['onCommit'];
   rot?: number;
   pendingPose?: { x: number; z: number; rot: number } | null;
+  sim?: Sim | null;
 }) {
   const pt = useRef({ x: 0, z: 0 });
   return kind ? (
@@ -396,6 +397,7 @@ function Ghost({ kind, buildId, roadFrom, onCommit, rot, pendingPose }: {
       onCommit={onCommit}
       rot={rot}
       pending={pendingPose}
+      sim={sim}
     />
   ) : null;
 }
@@ -657,7 +659,7 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
       )}
       {p.layers.has('pedflow') && <PedFlow sim={sim} ver={p.ver} />}
       {p.layers.has('labels') && <Labels key={`labels-${staticKey}`} city={city} ver={p.ver} />}
-      <Ghost kind={p.placeKind} buildId={p.buildId} roadFrom={p.roadFrom} onCommit={p.onCommit} rot={p.buildRot} pendingPose={p.pendingPose} />
+      <Ghost kind={p.placeKind} buildId={p.buildId} roadFrom={p.roadFrom} onCommit={p.onCommit} rot={p.buildRot} pendingPose={p.pendingPose} sim={sim} />
       <DisasterGhost preview={p.disasterPreview ?? null} />
       {p.layers.has('buildings') && <LandmarkExtras buildings={city.buildings} />}
     </Canvas>

@@ -293,7 +293,7 @@ function ConsequencePanel({
         <div className="acts confirm-acts">
           <button type="button" onClick={onCancel}>Anuluj</button>
           <button type="button" className="primary" onClick={pending ? onConfirm : onConfirmDisaster}>
-            {pendingDisaster ? 'Uruchom' : 'Zatwierdź'}
+            {pendingDisaster ? 'Uruchom' : 'Zatwierdź'} <small>Enter</small>
           </button>
         </div>
       ) : (
@@ -431,7 +431,7 @@ function EventsPanel({
   return (
     <aside className="panel events">
       <h2>Zdarzenia <small>scenariusze</small></h2>
-      <p className="sub">Wybierz → kliknij mapę → podgląd → uruchom</p>
+      <p className="sub">Wybierz → kliknij mapę → Enter uruchamia · Esc anuluje</p>
       <div className="event-list">
         {(Object.keys(DISASTERS) as DisasterKind[]).map((k) => (
           <button
@@ -680,23 +680,23 @@ function HelpSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
         <button type="button" onClick={onClose} aria-label="Zamknij">×</button>
       </header>
       <ul>
-        <li><kbd>LPM</kbd> wybierz / obrót kamery</li>
+        <li><kbd>LPM</kbd> przeciągnij — przesuwanie mapy · klik — wybór</li>
         <li><kbd>Scroll</kbd> zoom</li>
-        <li><kbd>PPM</kbd> / środkowy — przesuwanie</li>
+        <li><kbd>PPM</kbd> przeciągnij — obrót kamery</li>
         <li><kbd>Shift</kbd>+<kbd>PPM</kbd> pochylenie</li>
         <li><kbd>WASD</kbd> / strzałki — przesuwanie</li>
         <li><kbd>Q</kbd> / <kbd>E</kbd> — obrót widoku</li>
-        <li><kbd>R</kbd> obrót budynku</li>
-        <li><kbd>Esc</kbd> anuluj</li>
+        <li><kbd>R</kbd> obrót budynku (podgląd)</li>
+        <li><kbd>Enter</kbd> zatwierdź podgląd</li>
+        <li><kbd>Backspace</kbd> anuluj niebieski podgląd</li>
+        <li><kbd>Esc</kbd> anuluj akcję</li>
+        <li><kbd>Delete</kbd>×2 zburz zaznaczony budynek gracza</li>
         <li><kbd>Z</kbd> / <kbd>Y</kbd> cofnij / ponów</li>
-        <li><kbd>Delete</kbd> / <kbd>Backspace</kbd> zburz budynek gracza</li>
         <li><kbd>Space</kbd> pauza</li>
         <li><kbd>N</kbd> całe miasto</li>
         <li><kbd>1–3</kbd> Buduj / Analiza / Zdarzenia</li>
-        <li>Najedź na <b>Krakopolis</b> — historia miasta, cofnij / ponów</li>
-        <li>Widok (prawy dół): Szukaj · Metryki · Panele · Minimapa · Stopka · Tryby — zwijanie etykietą Widok</li>
-        <li>Chevrony z boków zwijają pojedynczy panel</li>
-        <li>Warstwy mapy i napisy: tryb <b>Analiza</b> (panel Mapa)</li>
+        <li>Najedź na <b>Krakopolis</b> — historia miasta</li>
+        <li>Widok (prawy dół): Szukaj · Metryki · Panele · Minimapa · Stopka · Tryby</li>
       </ul>
     </div>
   );
@@ -1037,7 +1037,7 @@ export function Hud({
               </dl>
               <div className="acts">
                 <button type="button" onClick={() => goto(pb.x, pb.z)}>Wycentruj</button>
-                <button type="button" className="danger" title="Delete / Backspace" onClick={() => {
+                <button type="button" className="danger" title="Delete ×2" onClick={() => {
                   act(() => sim.removePlayerBuilding(pb.id), `Zburzono: ${pb.name}.`);
                   setSel(null);
                   setVehicle(null);
@@ -1068,15 +1068,15 @@ export function Hud({
       )}
 
       <div className="hint">
-        {pending ? 'Podgląd budowy – Anuluj / Zatwierdź w panelu.'
-          : pendingDisaster ? 'Podgląd scenariusza – Anuluj / Uruchom symulację.'
-            : mode === 'build' ? (selectedSpec ? `${selectedSpec.label}: kliknij mapę · R obraca.`
+        {pending ? 'Podgląd budowy – Enter zatwierdza · Backspace / Esc anuluje.'
+          : pendingDisaster ? 'Podgląd scenariusza – Enter uruchamia · Esc anuluje.'
+            : mode === 'build' ? (selectedSpec ? `${selectedSpec.label}: kliknij mapę · R obraca · Enter zatwierdza.`
               : tool === 'road' || tool === 'tram-track' ? 'Kliknij początek, potem koniec odcinka.'
                 : tool === 'stop-bus' || tool === 'stop-tram' ? 'Kliknij miejsce przystanku na mapie.'
                   : 'Wybierz obiekt z katalogu po prawej.')
               : mode === 'events' ? `Kliknij miejsce: ${DISASTERS[disaster].label}.`
-                : mode === 'analyze' ? 'Warstwy modelu i mapy w panelu po prawej · Napisy na dole.'
-                    : 'LPM = obrót · PPM = przesuwanie · ? = sterowanie · Widok = prawy dół · najedź na Krakopolis = historia.'}
+                : mode === 'analyze' ? 'Warstwy modelu i mapy w panelu po prawej.'
+                    : 'LPM = pan · PPM = obrót · ? = sterowanie · Krakopolis = historia.'}
       </div>
       {toast && <div className="toast">{toast}</div>}
 

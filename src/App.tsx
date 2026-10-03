@@ -238,6 +238,26 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     setMsg((m) => ({ id: m.id + 1, text: 'Anulowano planowaną zmianę.' }));
   }, []);
 
+  /** Tylko preview / pending – bez kasowania istniejących budynków. */
+  const cancelPreviewOnly = useCallback(() => {
+    if (pending || pendingDisaster || roadFrom || buildId) {
+      setPending(null);
+      setPendingDisaster(null);
+      setRoadFrom(null);
+      setBuildId(null);
+      setBuildRot(0);
+      setReport(null);
+      if (mode === 'build') setTool('build');
+      else if (mode === 'events') setTool('disaster');
+      else setTool('select');
+      setMsg((m) => ({ id: m.id + 1, text: 'Anulowano podgląd.' }));
+      return true;
+    }
+    return false;
+  }, [pending, pendingDisaster, roadFrom, buildId, mode]);
+
+  const deleteArmed = useRef<number | null>(null);
+
   const setWorkspaceMode = useCallback((m: WorkspaceMode) => {
     setMode((prev) => {
       const next = prev === m ? null : m;
@@ -435,8 +455,37 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
       const k = e.key.toLowerCase();
+
+      // ENTER — zatwierdź podgląd (budowa / katastrofa)
+      if (e.key === 'Enter') {
+        if (pending) {
+          e.preventDefault();
+          void confirmPending();
+          return;
+        }
+        if (pendingDisaster) {
+          e.preventDefault();
+          void confirmDisaster();
+          return;
+        }
+      }
+
+      // BACKSPACE — tylko anuluj preview (NIGDY nie usuwa budynku)
+      if (e.key === 'Backspace') {
+        if (pending || pendingDisaster || roadFrom || (tool === 'build' && buildId)) {
+          e.preventDefault();
+          cancelPreviewOnly();
+          return;
+        }
+        return;
+      }
+
       if (k === 'escape') {
         e.preventDefault();
+        if (pending || pendingDisaster || roadFrom || buildId) {
+          cancelPreviewOnly();
+          return;
+        }
         cancelAll();
         setSel(null);
         setVehicle(null);
@@ -468,10 +517,19 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         });
         return;
       }
-      if (e.key === 'Delete' || e.key === 'Backspace') {
+      // DELETE — tylko zaznaczony budynek gracza, po potwierdzeniu (2× Delete)
+      if (e.key === 'Delete') {
         if (sel?.kind === 'player') {
           e.preventDefault();
           const id = sel.id;
+          if (deleteArmed.current !== id) {
+            deleteArmed.current = id;
+            const name = sim.playerBuildings.find((b) => b.id === id)?.name ?? 'budynek';
+            setMsg((m) => ({ id: m.id + 1, text: `Naciśnij Delete ponownie, aby zburzyć: ${name}.` }));
+            window.setTimeout(() => { if (deleteArmed.current === id) deleteArmed.current = null; }, 3500);
+            return;
+          }
+          deleteArmed.current = null;
           const name = sim.playerBuildings.find((b) => b.id === id)?.name ?? 'budynek';
           act(() => sim.removePlayerBuilding(id), `Zburzono: ${name}.`);
           setSel(null);
@@ -497,7 +555,21 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [act, cancelAll, fitCity, pending, sel, setWorkspaceMode, sim, tool]);
+  }, [
+    act, buildId, cancelAll, cancelPreviewOnly, confirmDisaster, confirmPending,
+    fitCity, pending, pendingDisaster, roadFrom, sel, setWorkspaceMode, sim, tool,
+  ]);
+
+  // Komunikaty z modelu katastrof
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const notes = sim.takeNotices();
+      if (notes.length) {
+        setMsg((m) => ({ id: m.id + 1, text: notes[notes.length - 1] }));
+      }
+    }, 500);
+    return () => window.clearInterval(t);
+  }, [sim]);
 
   const placeKind: PlaceKind | null =
     pending ? 'build'

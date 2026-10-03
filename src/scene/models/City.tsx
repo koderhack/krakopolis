@@ -977,10 +977,18 @@ export function DisasterLayer({ sim, ver }: { sim: Sim; ver: number }) {
             );
           }
           if (d.kind === 'flood' || d.kind === 'rain') {
+            const waterH = 0.4 + 2.8 * d.intensity;
             return (
-              <mesh key={`w${i}-${rid}`} position={[x, y + 0.9, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
-                <boxGeometry args={[e.len, 1.2, 9]} />
-                <meshStandardMaterial color={d.kind === 'rain' ? '#3a7a9a' : '#2f6f92'} transparent opacity={0.5 * d.intensity} />
+              <mesh key={`w${i}-${rid}`} position={[x, y + waterH * 0.45, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
+                <boxGeometry args={[e.len * 0.98, waterH, 11 + 4 * d.intensity]} />
+                <meshStandardMaterial
+                  color={d.kind === 'rain' ? '#3a7a9a' : '#2a6a8e'}
+                  transparent
+                  opacity={0.35 + 0.4 * d.intensity}
+                  roughness={0.15}
+                  metalness={0.35}
+                  depthWrite={false}
+                />
               </mesh>
             );
           }
@@ -1009,7 +1017,7 @@ export function DisasterLayer({ sim, ver }: { sim: Sim; ver: number }) {
   );
 }
 
-/** Lekka animacja pożaru: kilka stożków + dym, bez systemu cząstek. */
+/** Lekka animacja pożaru: poziom z intensywności (LOW→CRITICAL). */
 function FireFx({ x, y, z, intensity }: { x: number; y: number; z: number; intensity: number }) {
   const g = useRef<THREE.Group>(null);
   useFrame((_, dt) => {
@@ -1024,11 +1032,12 @@ function FireFx({ x, y, z, intensity }: { x: number; y: number; z: number; inten
       mesh.rotation.y += dt * (0.4 + i * 0.15);
     });
   });
-  const s = intensity;
+  const s = Math.max(0.2, intensity);
+  const glow = intensity >= 0.85 ? 1.15 : intensity >= 0.6 ? 1 : intensity >= 0.35 ? 0.85 : 0.65;
   return (
     <group ref={g} position={[x, y, z]}>
       <mesh position={[0, 5 * s, 0]}>
-        <coneGeometry args={[3.2 * s, 9 * s, 6]} />
+        <coneGeometry args={[3.2 * s * glow, 9 * s * glow, 6]} />
         <meshBasicMaterial color="#ff9a2a" transparent opacity={0.92} toneMapped={false} />
       </mesh>
       <mesh position={[1.2 * s, 8 * s, -0.6 * s]}>
@@ -1039,14 +1048,21 @@ function FireFx({ x, y, z, intensity }: { x: number; y: number; z: number; inten
         <coneGeometry args={[2.1 * s, 7 * s, 5]} />
         <meshBasicMaterial color="#ffd060" transparent opacity={0.7} toneMapped={false} />
       </mesh>
-      <mesh position={[0.4 * s, 14 * s, 0.2 * s]}>
-        <coneGeometry args={[4.5 * s, 12 * s, 6]} />
-        <meshStandardMaterial color="#5a5a5a" transparent opacity={0.28 * s} depthWrite={false} />
-      </mesh>
-      <mesh position={[-0.6 * s, 19 * s, -0.4 * s]}>
-        <coneGeometry args={[5.5 * s, 14 * s, 6]} />
-        <meshStandardMaterial color="#3a3a3a" transparent opacity={0.2 * s} depthWrite={false} />
-      </mesh>
+      {intensity >= 0.35 && (
+        <mesh position={[0.4 * s, 14 * s, 0.2 * s]}>
+          <coneGeometry args={[4.5 * s, 12 * s, 6]} />
+          <meshStandardMaterial color="#5a5a5a" transparent opacity={0.28 * s} depthWrite={false} />
+        </mesh>
+      )}
+      {intensity >= 0.6 && (
+        <mesh position={[-0.6 * s, 19 * s, -0.4 * s]}>
+          <coneGeometry args={[5.5 * s, 14 * s, 6]} />
+          <meshStandardMaterial color="#3a3a3a" transparent opacity={0.22 * s} depthWrite={false} />
+        </mesh>
+      )}
+      {intensity >= 0.85 && (
+        <pointLight color="#ff6a20" intensity={2.2 * s} distance={48} decay={2} position={[0, 6 * s, 0]} />
+      )}
     </group>
   );
 }

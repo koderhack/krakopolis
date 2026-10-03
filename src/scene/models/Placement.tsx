@@ -1,11 +1,13 @@
 /**
  * Niebieski podgląd miejsca, w którym coś postawimy.
+ * Czerwony = lokalizacja niedozwolona (walidacja z Sim).
  */
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useFrame, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { groundY } from '../terrain';
 import { buildSpec, type BuildId } from '../../simulation/city/catalog';
+import type { Sim } from '../../simulation/sim';
 
 export type PlaceKind = 'park' | 'park-rect' | 'stop-bus' | 'stop-tram' | 'road' | 'tram-track' | 'build';
 
@@ -21,8 +23,11 @@ const SPECS: Record<Exclude<PlaceKind, 'build'>, { w: number; d: number; h: numb
 const isLineTool = (k: PlaceKind | null) => k === 'road' || k === 'tram-track';
 const isStopTool = (k: PlaceKind | null) => k === 'stop-bus' || k === 'stop-tram';
 
+const OK = '#4aa3ff';
+const BAD = '#e0453a';
+
 export function PlacementGhost({
-  kind, buildId, roadFrom, point, onCommit, rot = 0, pending,
+  kind, buildId, roadFrom, point, onCommit, rot = 0, pending, sim,
 }: {
   kind: PlaceKind | null;
   buildId?: BuildId | null;
@@ -32,6 +37,7 @@ export function PlacementGhost({
   rot?: number;
   /** Gdy jest pending – zamrażamy ghost w miejscu planu. */
   pending?: { x: number; z: number; rot: number } | null;
+  sim?: Sim | null;
 }) {
   const box = useRef<THREE.Mesh>(null);
   const foot = useRef<THREE.Mesh>(null);
@@ -40,6 +46,17 @@ export function PlacementGhost({
   const ring = useRef<THREE.Mesh>(null);
   const line = useRef<THREE.Mesh>(null);
   const aura = useRef<THREE.Mesh>(null);
+  const validRef = useRef(true);
+
+  const mats = useMemo(() => ({
+    box: new THREE.MeshStandardMaterial({ color: OK, transparent: true, opacity: 0.45, depthWrite: false }),
+    foot: new THREE.MeshBasicMaterial({ color: '#5cc8ff', transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide }),
+    arrow: new THREE.MeshBasicMaterial({ color: '#ffd36a', transparent: true, opacity: 0.85, depthWrite: false }),
+    aura: new THREE.MeshBasicMaterial({ color: OK, transparent: true, opacity: 0.12, depthWrite: false }),
+    disc: new THREE.MeshStandardMaterial({ color: OK, transparent: true, opacity: 0.4, depthWrite: false }),
+    ring: new THREE.MeshBasicMaterial({ color: '#5cc8ff', transparent: true, opacity: 0.55, side: THREE.DoubleSide }),
+    line: new THREE.MeshStandardMaterial({ color: '#5cc8ff', transparent: true, opacity: 0.55, depthWrite: false }),
+  }), []);
 
   useFrame(() => {
     const p = pending ? { x: pending.x, z: pending.z } : point.current;
@@ -49,6 +66,20 @@ export function PlacementGhost({
     const spec = catalog
       ? { w: catalog.w, d: catalog.d, h: catalog.h }
       : (kind && kind !== 'build' ? SPECS[kind] : null);
+
+    let ok = true;
+    if (kind === 'build' && buildId && sim) {
+      ok = sim.validatePlacement(buildId, p.x, p.z, yaw) == null;
+    }
+    validRef.current = ok;
+    const col = ok ? OK : BAD;
+    mats.box.color.set(col);
+    mats.aura.color.set(col);
+    mats.disc.color.set(col);
+    mats.foot.color.set(ok ? '#5cc8ff' : '#ff8a7a');
+    mats.ring.color.set(ok ? '#5cc8ff' : '#ff8a7a');
+    mats.line.color.set(ok ? '#5cc8ff' : '#ff8a7a');
+    mats.arrow.color.set(ok ? '#ffd36a' : '#ff6a4a');
 
     if (box.current) {
       const showBox = !!spec && (kind === 'build' || kind === 'park-rect');
@@ -125,33 +156,26 @@ export function PlacementGhost({
 
   return (
     <group>
-      <mesh ref={box} visible={false}>
+      <mesh ref={box} visible={false} material={mats.box}>
         <boxGeometry args={[1, 1, 1]} />
-        <meshStandardMaterial color="#4aa3ff" transparent opacity={0.45} depthWrite={false} />
       </mesh>
-      <mesh ref={foot} rotation-x={-Math.PI / 2} visible={false}>
+      <mesh ref={foot} rotation-x={-Math.PI / 2} visible={false} material={mats.foot}>
         <planeGeometry args={[1, 1]} />
-        <meshBasicMaterial color="#5cc8ff" transparent opacity={0.22} depthWrite={false} side={THREE.DoubleSide} />
       </mesh>
-      <mesh ref={arrow} visible={false}>
+      <mesh ref={arrow} visible={false} material={mats.arrow}>
         <coneGeometry args={[2.2, 5, 4]} />
-        <meshBasicMaterial color="#ffd36a" transparent opacity={0.85} depthWrite={false} />
       </mesh>
-      <mesh ref={aura} rotation-x={-Math.PI / 2} visible={false}>
+      <mesh ref={aura} rotation-x={-Math.PI / 2} visible={false} material={mats.aura}>
         <circleGeometry args={[1, 48]} />
-        <meshBasicMaterial color="#4aa3ff" transparent opacity={0.12} depthWrite={false} />
       </mesh>
-      <mesh ref={disc} rotation-x={-Math.PI / 2} visible={false}>
+      <mesh ref={disc} rotation-x={-Math.PI / 2} visible={false} material={mats.disc}>
         <circleGeometry args={[1, 40]} />
-        <meshStandardMaterial color="#4aa3ff" transparent opacity={0.4} depthWrite={false} />
       </mesh>
-      <mesh ref={ring} visible={false} rotation-x={-Math.PI / 2} onPointerMove={track} onClick={commit}>
+      <mesh ref={ring} visible={false} rotation-x={-Math.PI / 2} onPointerMove={track} onClick={commit} material={mats.ring}>
         <ringGeometry args={[6, 9, 28]} />
-        <meshBasicMaterial color="#5cc8ff" transparent opacity={0.55} side={THREE.DoubleSide} />
       </mesh>
-      <mesh ref={line} visible={false}>
+      <mesh ref={line} visible={false} material={mats.line}>
         <boxGeometry args={[1, 1, 1]} />
-        <meshStandardMaterial color="#5cc8ff" transparent opacity={0.55} depthWrite={false} />
       </mesh>
       {!pending && (
         <mesh rotation-x={-Math.PI / 2} position={[0, 0.15, 0]} onPointerMove={track} onClick={commit}>

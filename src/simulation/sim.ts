@@ -16,7 +16,7 @@ import {
   DISASTERS, DISASTER_EFFECTS, PlayerHistory, disasterPenalty, pickRoads,
   type DisasterKind, type DisasterState, type NewStop, type PlayerBuilding, type PlayerChange, type RoadClosure,
 } from './city/player';
-import { buildSpec, type BuildId } from './city/catalog';
+import { buildSpec, overlaps, type BuildId } from './city/catalog';
 import type { Origin } from '../data/types';
 import { BUDGET_INCOME_PER_SIM_SEC, COST_SCALE, START_BUDGET_PLN } from '../data/budget';
 
@@ -187,6 +187,21 @@ export class Sim {
   /** Mnożnik prędkości od aktywnych katastrof (0..1). */
   private disasterSpeed = 1;
   private disasterMood = { speed: 1, satisfaction: 0, pollution: 0, noise: 0 };
+  private notices: string[] = [];
+
+  pushNotice(text: string) {
+    if (!text) return;
+    this.notices.push(text);
+    if (this.notices.length > 8) this.notices.shift();
+  }
+
+  /** Pobiera i czyści kolejkę komunikatów (UI). */
+  takeNotices(): string[] {
+    if (!this.notices.length) return [];
+    const out = this.notices.slice();
+    this.notices.length = 0;
+    return out;
+  }
   private costByRoad = new Map<number, number>();
   /** Budynki postawione przez gracza – SIMULATED. */
   playerBuildings: PlayerBuilding[] = [];
@@ -1237,15 +1252,10 @@ export class Sim {
 
   /** Nowy budynek z katalogu (SIMULATED). */
   addStructure(kind: BuildId, x: number, z: number, rot = 0): string | null {
+    const bad = this.validatePlacement(kind, x, z, rot);
+    if (bad) return bad;
     const spec = buildSpec(kind);
-    const area = this.city?.area;
-    const mLon = 111_320 * Math.cos(((area?.origin.lat ?? 50.06) * Math.PI) / 180);
-    const halfX = ((area ? area.maxLon - area.origin.lon : 0.011) * mLon) / 2 - 20;
-    const halfZ = ((area ? area.origin.lat - area.minLat : 0.009) * 111_320) / 2 - 20;
-    if (Math.abs(x) > halfX || Math.abs(z) > halfZ) return 'Poza obszarem miasta.';
     if (spec.id === 'park') return this.addPark(x, z, 'circle', spec.w, spec.d);
-    const clash = this.playerBuildings.some((b) => Math.hypot(b.x - x, b.z - z) < Math.max(b.w, b.d) * 0.55);
-    if (clash) return 'Za blisko innego budynku.';
     if (!this.spend(spec.cost)) return 'Za mało środków w budżecie.';
 
     const angle = spec.rotatable ? rot : 0;
@@ -1272,6 +1282,50 @@ export class Sim {
     apply();
     this.hubs = [...this.hubs, this.nearestCarNode(x, z)].filter((n) => n >= 0);
     this.history.push({ label: b.name, at: Date.now(), apply, revert });
+    return null;
+  }
+
+  /**
+   * Czy można postawić budynek w (x,z) – używane przez ghost i zatwierdzenie.
+   * Zwraca komunikat błędu albo null gdy OK.
+   */
+  validatePlacement(kind: BuildId, x: number, z: number, rot = 0): string | null {
+    const spec = buildSpec(kind);
+    const area = this.city?.area;
+    const mLon = 111_320 * Math.cos(((area?.origin.lat ?? 50.06) * Math.PI) / 180);
+    const halfX = ((area ? area.maxLon - area.origin.lon : 0.011) * mLon) / 2 - 20;
+    const halfZ = ((area ? area.origin.lat - area.minLat : 0.009) * 111_320) / 2 - 20;
+    if (Math.abs(x) > halfX || Math.abs(z) > halfZ) return 'Poza obszarem miasta.';
+
+    const foot = { x, z, w: spec.w, d: spec.d, rot: spec.rotatable ? rot : 0 };
+    for (const b of this.playerBuildings) {
+      if (overlaps(foot, { x: b.x, z: b.z, w: b.w, d: b.d, rot: b.rot ?? 0 })) {
+        return 'Za blisko innego budynku.';
+      }
+    }
+
+    // Kolizja z istniejącą drogą (środek footprintu na jezdni).
+    for (const r of this.roads) {
+      const e = r.edge;
+      if (!e.carAccess && !e.hasTram) continue;
+      const d = distToSegment(e, x, z);
+      const halfW = (e.lanesForward ?? 1) * 1.8 + 3.5;
+      if (d < halfW) {
+        return 'Nie można budować na istniejącej drodze.';
+      }
+    }
+
+    // Zgrubna kolizja z bryłami OSM (środek w obrębie budynku).
+    const buildings = this.city?.buildings;
+    if (buildings) {
+      for (const b of buildings) {
+        if (b.h < 4) continue;
+        const dx = Math.abs(b.x - x), dz = Math.abs(b.z - z);
+        if (dx < (b.w + spec.w) * 0.42 && dz < (b.d + spec.d) * 0.42) {
+          return 'Brak miejsca — kolizja z istniejącą zabudową.';
+        }
+      }
+    }
     return null;
   }
 
@@ -1418,15 +1472,21 @@ export class Sim {
     );
     const roads = hit.map((r) => r.edge.id);
     const d: DisasterState = {
-      kind, roads, intensity: 1, startedAt: Date.now(),
+      kind, roads, intensity: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
+      peak: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
+      phase: kind === 'fire' || kind === 'flood' ? 'grow' : 'peak',
+      startedAt: Date.now(),
       label: def.label, cx, cz,
+      lastNotice: kind === 'fire' ? 'Wykryto pożar.' : kind === 'flood' ? 'Wykryto zagrożenie powodziowe.' : `${def.label} — start.`,
     };
+    this.pushNotice(d.lastNotice!);
     const apply = () => {
       this.disasters.push(d);
       for (const id of roads) {
         const r = this.roads[id];
         if (!r) continue;
-        if (kind === 'earthquake' || kind === 'fire') { r.destroyed = true; r.closure = 'none'; }
+        if (kind === 'earthquake') { r.destroyed = true; r.closure = 'none'; }
+        else if (kind === 'fire') { r.closure = 'closed'; } // na początku zamknięcie, nie od razu zniszczenie
         else if (kind === 'flood' || kind === 'rain') { r.closure = 'closed'; }
         else if (kind === 'blackout' || kind === 'heat') { /* spowolnienie przez disasterMood */ }
       }
@@ -1454,31 +1514,101 @@ export class Sim {
     return null;
   }
 
-  /** Katastrofy wygasają z czasem; pożar i powódź są gaszone. */
+  /** Katastrofy: wzrost → szczyt → gaszenie; pożar może objąć sąsiednie odcinki. */
   private tickDisasters(dt: number) {
     if (!this.disasters.length) { this.disasterSpeed = 1; return; }
     for (const d of this.disasters) {
+      const age = (Date.now() - d.startedAt) / 1000;
+
       if (d.kind === 'blackout') {
-        // awaria sieci trwa kilka minut, potem wraca zasilanie
-        if ((Date.now() - d.startedAt) / 1000 > 240) d.intensity = Math.max(0, d.intensity - dt * 0.25);
+        if (age > 240) d.intensity = Math.max(0, d.intensity - dt * 0.25);
+      } else if (d.kind === 'fire' || d.kind === 'flood') {
+        if (d.phase === 'grow') {
+          d.intensity = Math.min(1, d.intensity + dt * (d.kind === 'fire' ? 0.08 : 0.055));
+          d.peak = Math.max(d.peak, d.intensity);
+          if (d.kind === 'fire' && d.intensity > 0.55 && d.lastNotice !== 'fire-spread') {
+            this.spreadFire(d);
+            d.lastNotice = 'fire-spread';
+            this.pushNotice('Pożar rozprzestrzenia się na sąsiednie odcinki.');
+          }
+          if (d.kind === 'flood' && d.intensity > 0.45 && d.lastNotice !== 'flood-rise') {
+            d.lastNotice = 'flood-rise';
+            this.pushNotice('Poziom wody wzrasta.');
+          }
+          if (d.intensity >= 0.92 || age > 45) {
+            d.phase = 'peak';
+            if (d.kind === 'fire') {
+              this.pushNotice('Straż została wysłana.');
+              this.pushNotice('Rozpoczęto ewakuację.');
+              // część odcinków „spalona”
+              for (const id of d.roads.slice(0, Math.max(1, Math.ceil(d.roads.length * 0.4)))) {
+                const r = this.roads[id];
+                if (r) { r.destroyed = true; r.closure = 'none'; }
+              }
+              this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
+              this.pushNotice('Droga została zamknięta.');
+            } else {
+              this.pushNotice('Rozpoczęto ewakuację.');
+              this.pushNotice('Droga została zamknięta.');
+            }
+            this.invalidateRouting();
+            this.reroute();
+          }
+        } else if (d.phase === 'peak') {
+          if (age > 70) {
+            d.phase = 'contain';
+            this.pushNotice(d.kind === 'fire' ? 'Pożar jest gaszony.' : 'Poziom wody stabilny.');
+          }
+        } else if (d.phase === 'contain') {
+          d.intensity = Math.max(0, d.intensity - dt * 0.07);
+          if (d.intensity < 0.28) {
+            for (const id of d.roads) {
+              const r = this.roads[id];
+              if (!r) continue;
+              if (r.destroyed && d.kind === 'fire') continue;
+              if (r.closure === 'closed') r.closure = 'none';
+            }
+            this.invalidateRouting();
+          }
+          if (d.intensity < 0.08) {
+            d.phase = 'done';
+            this.pushNotice(d.kind === 'fire' ? 'Pożar opanowany.' : 'Poziom wody opadł.');
+          }
+        }
       } else {
         d.intensity = Math.max(0, d.intensity - dt * 0.05);
-        // gaszenie: po 60 s odblokowujemy część odcinków
-        if (d.intensity < 0.25 && (d.kind === 'fire' || d.kind === 'flood')) {
+        if (d.intensity < 0.25 && (d.kind === 'rain')) {
           for (const id of d.roads) {
             const r = this.roads[id];
-            if (!r) continue;
-            if (r.destroyed && d.kind === 'fire') continue; // spalone odcinki zostają
-            if (r.closure === 'closed') r.closure = 'none';
+            if (r?.closure === 'closed') r.closure = 'none';
           }
           this.invalidateRouting();
         }
       }
+      d.peak = Math.max(d.peak ?? 0, d.intensity);
     }
-    this.disasters = this.disasters.filter((d) => d.intensity > 0.02);
+    this.disasters = this.disasters.filter((d) => d.intensity > 0.02 && d.phase !== 'done');
     const p = disasterPenalty(this.disasters);
     this.disasterSpeed = p.speed;
     this.disasterMood = p;
+  }
+
+  /** Dołącz 1–2 sąsiednie odcinki do pożaru (bez czystego randomu – najbliższe). */
+  private spreadFire(d: DisasterState) {
+    if (d.cx == null || d.cz == null) return;
+    const candidates = this.roads
+      .map((r, id) => ({ id, r, dist: Math.hypot(((r.edge.ax + r.edge.bx) / 2) - d.cx!, ((r.edge.az + r.edge.bz) / 2) - d.cz!) }))
+      .filter((x) => x.r.edge.carAccess && !x.r.destroyed && !d.roads.includes(x.id) && x.dist < (DISASTERS.fire.radius * 1.35))
+      .sort((a, b) => a.dist - b.dist)
+      .slice(0, 2);
+    for (const c of candidates) {
+      d.roads.push(c.id);
+      c.r.closure = 'closed';
+    }
+    if (candidates.length) {
+      this.invalidateRouting();
+      this.reroute();
+    }
   }
 
   /** Lista zmian gracza do pokazania w UI. */

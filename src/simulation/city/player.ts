@@ -37,14 +37,20 @@ export interface DisasterState {
   kind: DisasterKind;
   /** Odcinki objęte skutkiem (zamknięte lub zniszczone). */
   roads: number[];
-  /** Bieżąca intensywność 0..1 – maleje z czasem przy pożarze i powodzi. */
+  /** Bieżąca intensywność 0..1 – rośnie, potem maleje. */
   intensity: number;
+  /** Szczyt do tej pory (do poziomu LOW/MEDIUM/HIGH/CRITICAL). */
+  peak: number;
   startedAt: number;
+  /** Faza: grow → peak → contain → done. */
+  phase: 'grow' | 'peak' | 'contain' | 'done';
   /** Opis skutków pokazywany w UI. */
   label: string;
   /** Epicentrum (do podglądu / minimapy). */
   cx?: number;
   cz?: number;
+  /** Ostatni komunikat fazy (unikamy spamowania). */
+  lastNotice?: string;
 }
 
 export interface NewStop {
@@ -124,6 +130,14 @@ export const DISASTER_EFFECTS = {
   heat: { satisfaction: -10, pollution: +8, noise: -2, speed: 0.88 },
   rain: { satisfaction: -9, pollution: +4, noise: +3, speed: 0.75 },
 } as const;
+
+/** Poziom wizualny katastrofy na podstawie intensywności. */
+export function disasterLevel(intensity: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' {
+  if (intensity >= 0.85) return 'CRITICAL';
+  if (intensity >= 0.6) return 'HIGH';
+  if (intensity >= 0.35) return 'MEDIUM';
+  return 'LOW';
+}
 
 /** Wpływ aktywnych katastrof na bieżący ruch i zadowolenie. */
 export function disasterPenalty(active: DisasterState[]): { speed: number; satisfaction: number; pollution: number; noise: number } {

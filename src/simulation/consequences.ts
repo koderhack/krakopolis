@@ -199,7 +199,7 @@ export function previewDisasterReport(p: {
 }): ConsequenceReport {
   return {
     title: `Scenariusz: ${p.label}`,
-    summary: `Promień ~${Math.round(p.radius)} m · ${p.roads} ulic zagrożonych · koszt ${formatBudgetPln(p.cost)}.`,
+    summary: `Promień ~${Math.round(p.radius)} m · ${p.roads} ulic zagrożonych · ok. ${p.estimatedAffected} osób · koszt ${formatBudgetPln(p.cost)}.`,
     observations: [
       {
         text: `Potencjalnie dotkniętych ok. ${p.estimatedAffected} mieszkańców.`,
@@ -210,6 +210,11 @@ export function previewDisasterReport(p: {
         text: `Zadowolenie ok. ${p.effects.satisfaction} pkt, smog ${p.effects.pollution >= 0 ? '+' : ''}${p.effects.pollution}, prędkość ruchu ×${p.effects.speed.toFixed(2)}.`,
         kind: 'info',
         confidence: 'średnia',
+      },
+      {
+        text: 'Enter uruchamia scenariusz. Esc anuluje podgląd.',
+        kind: 'info',
+        confidence: 'wysoka',
       },
     ],
     impacts: [
