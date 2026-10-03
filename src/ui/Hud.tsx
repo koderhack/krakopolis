@@ -8,7 +8,6 @@ import { LAYERS } from '../scene/layers';
 import { ANALYSIS_LAYERS } from '../scene/analysis';
 import { DISASTERS, type DisasterKind } from '../simulation/city/player';
 import type { PipelineSnapshot } from '../data/pipeline';
-import { formatAge } from '../data/cache/store';
 import type { Origin } from '../data/types';
 import { formatCoords } from '../data/adapters/cityAdapter';
 import { buildIndex, search, KIND_LABEL, type Place } from '../scene/search';
@@ -86,15 +85,13 @@ const Bar = ({ v, bad = true }: { v: number; bad?: boolean }) => (
   <span className="bar"><i style={{ width: `${Math.max(0, Math.min(100, Math.round(v)))}%`, background: tone(v, bad) }} /></span>
 );
 
-const ORIGIN_LABEL: Record<Origin, string> = { OBSERVED: 'OBSERVED', PREDICTED: 'PREDICTED', SIMULATED: 'SIMULATED' };
-const ORIGIN_TITLE: Record<Origin, string> = {
-  OBSERVED: 'Wprost z publicznego źródła danych',
-  PREDICTED: 'Policzone z danych zaobserwowanych',
-  SIMULATED: 'Wygenerowane przez symulację gry',
+const ORIGIN_LABEL: Record<Origin, string> = {
+  OBSERVED: 'na żywo',
+  PREDICTED: 'przybliżenie',
+  SIMULATED: 'w grze',
 };
 
 const pct = (v: number) => `${Math.round(Math.max(0, Math.min(1, v)) * 100)}%`;
-const fmtLat = (v: number) => v.toFixed(5);
 
 const CHANGE_LABEL: Record<string, string> = {
   closed: 'zamknięta dla wszystkich',
@@ -158,7 +155,7 @@ function SearchBox({
         </ul>
       )}
       {open && q.length >= 2 && results.length === 0 && (
-        <ul><li className="none">Brak wyników w danych OSM / GTFS dla „{q}”</li></ul>
+        <ul><li className="none">Brak wyników dla „{q}”</li></ul>
       )}
     </div>
   );
@@ -167,36 +164,38 @@ function SearchBox({
 /* ------------------------------------------------- panel wybranego pojazdu */
 
 function VehicleCard({ vehicle, city, setVehicle }: { vehicle: FleetPose; city: CityData; setVehicle: (v: FleetPose | null) => void }) {
-  // Czy to realny pojazd z GTFS-RT? Sprawdzamy po identyfikatorze.
   const real = city.liveVehicles.find((v) => v.id === vehicle.id);
-  const kind = vehicle.id.startsWith('T:') ? 'tramwaj' : vehicle.id.startsWith('A:') || vehicle.id.startsWith('M:') ? 'autobus' : 'pojazd symulacji';
+  const kind = vehicle.id.startsWith('T:') ? 'tramwaj' : vehicle.id.startsWith('A:') || vehicle.id.startsWith('M:') ? 'autobus' : 'pojazd';
   const line = real?.line ?? vehicle.ref;
   return (
     <aside className="panel vehicle">
       <h2>Linia {line}</h2>
-      <p className="sub">{real ? 'REALNY POJAZD z GTFS-RT' : 'pojazd symulacji na trasie GTFS'}</p>
+      <p className="sub">{real ? 'Pojazd MPK na żywo' : 'Pojazd w symulacji'}</p>
       <dl>
         <dt>Typ</dt><dd>{kind}</dd>
-        <dt>Kierunek</dt><dd>{real?.headsign ?? (vehicle.info ?? 'z GTFS')}</dd>
+        <dt>Kierunek</dt><dd>{real?.headsign ?? (vehicle.info ?? '—')}</dd>
         <dt>Status</dt>
         <dd>
-          {real ? <span className="tag observed">OBSERVED</span> : <span className="tag simulated">SIMULATED</span>}
+          {real
+            ? <span className="tag observed">{ORIGIN_LABEL.OBSERVED}</span>
+            : <span className="tag simulated">{ORIGIN_LABEL.SIMULATED}</span>}
         </dd>
-        <dt>Pozycja</dt>
-        <dd>{real ? `${real.latitude.toFixed(5)}, ${real.longitude.toFixed(5)}` : `x ${vehicle.x.toFixed(0)} m, z ${vehicle.z.toFixed(0)} m`}</dd>
-        <dt>Prędkość</dt>
-        <dd>{real?.speed !== undefined ? `${(real.speed * 3.6).toFixed(0)} km/h` : 'brak w feedzie'}</dd>
-        <dt>Globalny poziom</dt>
-        <dd><span className="tag observed">OBSERVED</span> {fmtLat(50.06162 + (vehicle.z ?? 0) / 111320).slice(0, 8)}</dd>
-        <dt>Dane</dt><dd>{real ? new Date(real.timestamp).toLocaleTimeString('pl-PL') : '—'}</dd>
+        {real && (
+          <>
+            <dt>Prędkość</dt>
+            <dd>{real.speed !== undefined ? `${(real.speed * 3.6).toFixed(0)} km/h` : '—'}</dd>
+            <dt>Aktualizacja</dt>
+            <dd>{new Date(real.timestamp).toLocaleTimeString('pl-PL')}</dd>
+          </>
+        )}
       </dl>
       <div className="acts">
         <button onClick={() => setVehicle(null)}>Zamknij</button>
       </div>
       <p className="note">
         {real
-          ? 'Pozycja i kurs odczytane wprost z feedu GTFS-RT ZTP Kraków. Zielony pierścień pod pojazdem oznacza dane obserwowane.'
-          : 'Pojazd jedzie po realnej trasie z GTFS, ale jego pozycja jest generowana przez symulację.'}
+          ? 'Zielony pierścień oznacza prawdziwy tramwaj lub autobus jadący teraz po Krakowie.'
+          : 'Ten pojazd jeździ po trasie MPK w ramach gry.'}
       </p>
     </aside>
   );
@@ -226,108 +225,7 @@ function LayersPanel({ layers, toggle }: { layers: Set<string>; toggle: (id: str
   );
 }
 
-/* ----------------------------------------------- lista zrealizowanych rzeczy */
 
-const DONE: { t: string; d: string }[] = [
-  { t: 'Prawdziwe drogi z OSM', d: 'graf 5866 odcinków, w tym torowiska' },
-  { t: 'Budynki z obrysów OSM', d: '3600 brył wyciągniętych na realne wysokości' },
-  { t: 'Linie i przystanki MPK', d: '120 linii, 72 przystanki z GTFS ZTP' },
-  { t: 'Realne pojazdy LIVE', d: 'pozycje GPS z GTFS-RT co 15 s' },
-  { t: 'Ruch z danych', d: 'poziom zakrzepienia z ZTP + predykcja objazdów' },
-  { t: 'Pogoda i powietrze', d: 'Open-Meteo, LIVE' },
-  { t: 'Wyszukiwarka miejsc', d: 'ulice, przystanki, urzędy z OSM' },
-  { t: 'Swobodna kamera', d: 'WASD + mysz w trybie lotu' },
-  { t: 'Edytor miasta', d: 'droga, przystanki, centrum handlowe, uczelnia' },
-  { t: 'Cofanie zmian', d: 'historia z ' },
-  { t: 'Katastrofy', d: 'pożar, powódź, blackout, trzęsienie ziemi' },
-  { t: 'Warstwy mapy', d: 'ruch pieszy, transport, etykiety, zniszczenia' },
-];
-
-function DonePanel({ sim }: { sim: Sim }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <aside className="done">
-      <button className="dp-head" onClick={() => setOpen(!open)}>
-        <span>ZROBIONE</span>
-        <em className="live">{DONE.length} punktów</em>
-        <i>{open ? '–' : '+'}</i>
-      </button>
-      {open && (
-        <div className="dp-body">
-          {DONE.map((d, i) => (
-            <div key={i} className="done-row">
-              <b>✓ {d.t}</b>
-              <span>{d.t.includes('histor') ? d.d + sim.history.depth + ' kroków' : d.d}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </aside>
-  );
-}
-
-/* ------------------------------------------------------- panel źródeł danych */
-
-function DataPanel({ pipe, city }: { pipe: PipelineSnapshot; city: CityData }) {
-  const [open, setOpen] = useState(true);
-  const [, force] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => force((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  const counts = useMemo(() => ({
-    roads: city.roads.length,
-    buildings: city.buildings.length,
-    stops: city.stops.length,
-    routes: city.routes.length,
-    signals: city.signals.length,
-  }), [city]);
-
-  const anyLive = pipe.statuses.some((s) => s.live);
-
-  return (
-    <aside className="datapanel">
-      <button className="dp-head" onClick={() => setOpen(!open)}>
-        <span>DANE</span>
-        <em className={anyLive ? 'live' : 'cached'}>
-          {anyLive ? 'część LIVE' : 'tryb CACHED'}
-        </em>
-        <i>{open ? '–' : '+'}</i>
-      </button>
-      {open && (
-        <div className="dp-body">
-          {pipe.statuses.map((s) => (
-            <div className="dp-row" key={s.id} title={s.error ?? s.note ?? ''}>
-              <span className="dp-name">{s.name}</span>
-              <span className={`dp-state ${s.live ? 'live' : s.freshness === 'CACHED' ? 'cached' : 'off'}`}>
-                {s.live ? 'LIVE' : s.freshness === 'CACHED' ? 'CACHED' : 'BRAK'}
-              </span>
-              <span className="dp-time">
-                {s.dataTimestamp ? formatAge(s.dataTimestamp) : s.error ? 'Data unavailable' : '—'}
-              </span>
-              {s.records !== undefined && <span className="dp-rec">{s.records} rek.</span>}
-            </div>
-          ))}
-          <div className="dp-sep" />
-          <div className="dp-row"><span className="dp-name">Dane statyczne</span><span className="dp-state cached">CACHED</span>
-            <span className="dp-time">{formatAge(city.generatedAt)}</span></div>
-          <dl className="dp-counts">
-            <div><dt>odcinków dróg</dt><dd>{counts.roads}</dd></div>
-            <div><dt>budynków</dt><dd>{counts.buildings}</dd></div>
-            <div><dt>przystanków</dt><dd>{counts.stops}</dd></div>
-            <div><dt>linii MPK</dt><dd>{counts.routes}</dd></div>
-            <div><dt>skrzyżowań ze światłami</dt><dd>{counts.signals}</dd></div>
-          </dl>
-          <p className="dp-foot">
-            Obszar: {city.area.name}. Dane offline zapisane {formatAge(city.generatedAt)} skryptem <code>npm run ingest</code>.
-          </p>
-          {pipe.errors.length > 0 && <p className="dp-err">{pipe.errors[0]}</p>}
-        </div>
-      )}
-    </aside>
-  );
-}
 
 /* --------------------------------------------------------------- środowisko */
 
@@ -337,20 +235,17 @@ function EnvironmentCard({ city }: { city: CityData }) {
   if (!w && !a) return null;
   return (
     <aside className="envcard">
-      <h3>Środowisko <small>dane zewnętrzne</small></h3>
+      <h3>Pogoda <small>Kraków</small></h3>
       {w && (
         <div className="env-row">
           <span>{w.description}, {w.temperatureC?.toFixed(1)}°C</span>
-          <em title={ORIGIN_TITLE.PREDICTED}>{ORIGIN_LABEL.PREDICTED}</em>
         </div>
       )}
       {a && (
         <div className="env-row">
           <span>powietrze: {a.description}{a.pm25 !== undefined ? ` · PM2.5 ${a.pm25.toFixed(1)} µg/m³` : ''}</span>
-          <em title={ORIGIN_TITLE.PREDICTED}>{ORIGIN_LABEL.PREDICTED}</em>
         </div>
       )}
-      <p className="env-note">Open-Meteo (model). Kraków nie udostępnia otwartego API stacji pomiarowych.</p>
     </aside>
   );
 }
@@ -381,12 +276,11 @@ function ConsequencePanel({
           </div>
         ))}
       </div>
-      <h3 className="obs-h">Obserwacje <small>szacunek modelu</small></h3>
+      <h3 className="obs-h">Co się zmieni</h3>
       <ul className="obs-list">
         {report.observations.map((o, i) => (
           <li key={i} className={`obs-${o.kind}`}>
             {o.text}
-            <small>pewność: {o.confidence}</small>
           </li>
         ))}
       </ul>
@@ -399,7 +293,7 @@ function ConsequencePanel({
         <div className="acts confirm-acts">
           <button type="button" onClick={onCancel}>Anuluj</button>
           <button type="button" className="primary" onClick={pending ? onConfirm : onConfirmDisaster}>
-            {pendingDisaster ? 'Uruchom symulację' : 'Zatwierdź'}
+            {pendingDisaster ? 'Uruchom' : 'Zatwierdź'}
           </button>
         </div>
       ) : (
@@ -407,7 +301,6 @@ function ConsequencePanel({
           <button type="button" onClick={onDismiss}>Zamknij</button>
         </div>
       )}
-      <p className="note">Wyniki to SIMULATED / szacunek modelu – nie „AI predictions”.</p>
     </aside>
   );
 }
@@ -493,8 +386,8 @@ function AnalysisPanel({
   return (
     <>
       <aside className="panel analysis">
-        <h2>Analiza <small>warstwy modelu</small></h2>
-        <p className="sub">Wyniki modelu – bez fałszywej precyzji</p>
+        <h2>Analiza <small>warstwy</small></h2>
+        <p className="sub">Zobacz, jak wygląda miasto pod różnymi kątami</p>
         {ANALYSIS_LAYERS.map((l) => (
           <button
             key={l.id}
@@ -505,13 +398,13 @@ function AnalysisPanel({
           >
             <i className="dot" />
             <span>{l.label}</span>
-            {l.estimate && <small>szacunek</small>}
+            {l.estimate && <small>przybliżenie</small>}
           </button>
         ))}
       </aside>
       <aside className="panel analysis map-layers">
-        <h2>Mapa <small>warstwy / napisy</small></h2>
-        <p className="sub">Włącz lub wyłącz elementy sceny</p>
+        <h2>Mapa <small>warstwy</small></h2>
+        <p className="sub">Włącz lub wyłącz elementy widoku</p>
         {LAYERS.map((l) => (
           <button
             key={l.id}
@@ -809,7 +702,7 @@ export function Hud({
   sim, city, sel, tool, mode, setMode, buildId, setBuildId, buildRot, rotateBuild,
   pending, pendingDisaster, report, versions,
   onConfirmPending, onConfirmDisaster, onCancelPending, onDismissReport, onRestoreVersion,
-  paused, speed, trafficView, msg, pipe, vehicle, goto, fitCity,
+  paused, speed, trafficView, msg, vehicle, goto, fitCity,
   layers, toggleLayer, analysis, toggleAnalysis, disaster, setDisaster, roadFrom, setTool,
   topDown, setTopDown, setPaused, setSpeed, setTrafficView, setVehicle, setSel, act,
   mapBounds, camSample, landmarks,
@@ -895,7 +788,7 @@ export function Hud({
           <>
             <div className="brand">
               <b>Krakopolis</b>
-              <span>laboratorium miasta · OSM + ZTP</span>
+              <span>planista miejski</span>
             </div>
             <div className="metrics">
               {METRICS.map((m) => (
@@ -993,7 +886,6 @@ export function Hud({
           {leftCollapsed ? '›' : '‹'}
         </button>
         <div className="side-stack">
-          <DataPanel pipe={pipe} city={city} />
           <LayersPanel layers={layers} toggle={toggleLayer} />
         </div>
       </div>
@@ -1039,12 +931,12 @@ export function Hud({
           {r && !report && (
             <aside className="panel">
               <h2>{r.edge.name || formatCoords((r.edge.ax + r.edge.bx) / 2, (r.edge.az + r.edge.bz) / 2)}</h2>
-              <p className="sub">{r.edge.roadClass} · {Math.round(r.edge.len)} m</p>
+              <p className="sub">{Math.round(r.edge.len)} m</p>
               <dl>
-                <dt>DANE ŹRÓDŁOWE</dt>
-                <dd><span className={`tag ${r.baselineOrigin.toLowerCase()}`}>{r.baselineOrigin}</span> {pct(r.baseline)}</dd>
-                <dt>PREDYKCJA</dt>
-                <dd>{pct(r.predicted)} <small>szacunek</small></dd>
+                <dt>Ruch teraz</dt>
+                <dd><span className={`tag ${r.baselineOrigin.toLowerCase()}`}>{ORIGIN_LABEL[r.baselineOrigin]}</span> {pct(r.baseline)}</dd>
+                <dt>Prognoza</dt>
+                <dd>{pct(r.predicted)}</dd>
                 <dt>Status</dt>
                 <dd className={r.closed ? 'bad' : ''}>{status}</dd>
               </dl>
@@ -1055,14 +947,14 @@ export function Hud({
           )}
           {b && !report && (
             <aside className="panel">
-              <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynek OSM')}</h2>
-              <p className="sub">Obrys OpenStreetMap</p>
+              <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynek')}</h2>
+              <p className="sub">Zabudowa miasta</p>
               <dl>
                 <dt>Typ</dt><dd>zabudowa / obiekt miejski</dd>
                 <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m</dd>
                 <dt>Obrys</dt><dd>{b.w.toFixed(0)} × {b.d.toFixed(0)} m</dd>
               </dl>
-              <p className="note">Budynków OSM nie można zburzyć — dane źródłowe zostają nietknięte. Zburz działa tylko dla budynków gracza.</p>
+              <p className="note">Tego budynku nie można zburzyć — należy do mapy miasta. Zburz działa tylko dla budynków, które sam postawiłeś.</p>
               <div className="acts">
                 <button type="button" onClick={() => goto(b.x, b.z, { kind: 'building', id: sel!.id })}>Wycentruj</button>
               </div>
@@ -1071,12 +963,11 @@ export function Hud({
           {pb && !report && (
             <aside className="panel">
               <h2>{pb.name}</h2>
-              <p className="sub">SIMULATED · budynek gracza</p>
+              <p className="sub">Twój budynek</p>
               <dl>
                 <dt>Typ</dt><dd>{pb.kind}</dd>
                 <dt>Mieszkańcy</dt><dd>{pb.residents}</dd>
                 <dt>Praca</dt><dd>{pb.jobs}</dd>
-                <dt>Ruch</dt><dd>szacunek modelu</dd>
               </dl>
               <div className="acts">
                 <button type="button" onClick={() => goto(pb.x, pb.z)}>Wycentruj</button>
@@ -1096,7 +987,7 @@ export function Hud({
         <nav className="tools">
           {(['simulated', 'baseline', 'predicted'] as TrafficView[]).map((v) => (
             <button key={v} type="button" className={trafficView === v ? 'on' : ''} onClick={() => setTrafficView(v)}>
-              {v === 'simulated' ? 'Kolor: symulacja' : v === 'baseline' ? 'Kolor: dane' : 'Kolor: predykcja'}
+              {v === 'simulated' ? 'Kolor: gra' : v === 'baseline' ? 'Kolor: teraz' : 'Kolor: prognoza'}
             </button>
           ))}
           <button
@@ -1179,9 +1070,8 @@ export function Hud({
 
       {showFoot && (
         <div className="foot">
-          <span className="sim">SIMULATED</span> {s.cars} aut, {s.trams} tram., {s.buses} autob., {s.peds} pieszych ·
-          <span className="obs"> OBSERVED</span> {s.realVehicles} live MPK ·
-          v{versions[versions.length - 1]?.id ?? 1} · {formatAge(s.assignmentAt)}
+          <span>{s.cars} aut · {s.trams} tram. · {s.buses} autob. · {s.peds} pieszych</span>
+          {s.realVehicles > 0 && <span> · {s.realVehicles} pojazdów MPK na żywo</span>}
           {roadFrom ? ' · punkt startowy zaznaczony' : ''}
           {changes.length ? ` · zmian ${changes.length}` : ''}
         </div>

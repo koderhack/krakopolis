@@ -104,7 +104,7 @@ export async function ensureRootVersion(): Promise<CityVersion> {
   const root: CityVersion = {
     id: 1,
     createdAt: new Date().toISOString(),
-    label: 'Stan początkowy (OSM + GTFS)',
+    label: 'Stan początkowy miasta',
     changes: [],
     metrics: { traffic: 0, satisfaction: 70, budget: START_BUDGET_PLN, residents: 0, jobs: 0 },
     snapshot: { buildings: [], parks: [], budget: START_BUDGET_PLN },

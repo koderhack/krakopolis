@@ -49,7 +49,7 @@ export function previewBuild(spec: BuildSpec, nearTraffic = 0.35): ConsequenceRe
 
   if (res > 0) {
     observations.push({
-      text: `Nowa zabudowa zwiększy liczbę mieszkańców o około ${res} (szacunek modelu).`,
+      text: `Nowa zabudowa zwiększy liczbę mieszkańców o około ${res}.`,
       kind: 'info',
       confidence: 'średnia',
     });
@@ -64,7 +64,7 @@ export function previewBuild(spec: BuildSpec, nearTraffic = 0.35): ConsequenceRe
   if (trafficPush > 8 || nearTraffic > 0.55) {
     observations.push({
       text: nearTraffic > 0.55
-        ? 'Najbliższe odcinki mogą zostać przeciążone w godzinach szczytu (szacunek modelu).'
+        ? 'Najbliższe ulice mogą być mocno zatłoczone w godzinach szczytu.'
         : 'Przewidywany wzrost ruchu lokalnego – warto sprawdzić dojazd i parking.',
       kind: 'warn',
       confidence: 'niska',
@@ -100,7 +100,7 @@ export function previewBuild(spec: BuildSpec, nearTraffic = 0.35): ConsequenceRe
   }
   if (!observations.length) {
     observations.push({
-      text: 'Zmiana ma ograniczony wpływ na metryki miasta (szacunek modelu).',
+      text: 'Zmiana ma ograniczony wpływ na miasto.',
       kind: 'info',
       confidence: 'średnia',
     });
@@ -121,10 +121,10 @@ export function previewBuild(spec: BuildSpec, nearTraffic = 0.35): ConsequenceRe
     observations,
     impacts,
     horizons: [
-      { label: 'TERAZ', note: 'Natychmiastowa zmiana budżetu i lokalnego ruchu (szacunek).' },
-      { label: '1 ROK', note: res || jobs ? 'Stabilizacja dojazdów i obciążenia usług (niska pewność).' : 'Brak istotnych zmian długoterminowych w modelu.' },
-      { label: '5 LAT', note: 'Model nie ma wystarczających danych demograficznych – nie szacujemy.' },
-      { label: '10 LAT', note: 'Brak danych – nie udajemy długoterminowej prognozy.' },
+      { label: 'TERAZ', note: 'Natychmiastowa zmiana budżetu i lokalnego ruchu.' },
+      { label: '1 ROK', note: res || jobs ? 'Stabilizacja dojazdów i obciążenia usług.' : 'Bez istotnych zmian długoterminowych.' },
+      { label: '5 LAT', note: 'Długoterminowy wpływ trudny do przewidzenia.' },
+      { label: '10 LAT', note: 'Za daleko w przyszłość – pomijamy.' },
     ],
     estimatedResidents: res,
     estimatedJobs: jobs,
@@ -144,19 +144,19 @@ export function reportAfterApply(
   const observations: Observation[] = [
     ...(extra ?? []),
     {
-      text: `Ruch ${dT >= 0 ? 'wzrosł' : 'spadł'} o ok. ${Math.abs(dT).toFixed(1)} pkt (symulacja).`,
+      text: `Ruch ${dT >= 0 ? 'wzrosł' : 'spadł'} o ok. ${Math.abs(dT).toFixed(1)} pkt.`,
       kind: dT > 3 ? 'warn' : dT < -2 ? 'good' : 'info',
       confidence: 'średnia',
     },
     {
-      text: `Zadowolenie ${dS >= 0 ? 'wzrosło' : 'spadło'} o ok. ${Math.abs(dS).toFixed(1)} pkt (szacunek modelu).`,
+      text: `Zadowolenie ${dS >= 0 ? 'wzrosło' : 'spadło'} o ok. ${Math.abs(dS).toFixed(1)} pkt.`,
       kind: dS > 1 ? 'good' : dS < -2 ? 'warn' : 'info',
       confidence: 'średnia',
     },
   ];
   return {
     title: `Zatwierdzono: ${label}`,
-    summary: 'Konsekwencje policzone przez lokalny model symulacji – nie są danymi OBSERVED.',
+    summary: 'Efekt Twojej decyzji w mieście.',
     observations,
     impacts: [
       { label: 'Ruch', level: levelFromAbs(dT, 2, 6), delta: `${dT >= 0 ? '+' : ''}${dT.toFixed(1)}` },
@@ -166,10 +166,10 @@ export function reportAfterApply(
       { label: 'Transport', level: levelFromAbs(after.transit - before.transit, 1, 4), delta: `${(after.transit - before.transit) >= 0 ? '+' : ''}${(after.transit - before.transit).toFixed(1)}` },
     ],
     horizons: [
-      { label: 'TERAZ', note: 'Wartości z bieżącej klatki symulacji.' },
-      { label: '1 ROK', note: 'Przybliżenie: utrzymanie kierunku zmian przy braku dalszych decyzji (niska pewność).' },
-      { label: '5 LAT', note: 'Brak modelu demograficznego – nie szacujemy.' },
-      { label: '10 LAT', note: 'Brak danych – pomijamy.' },
+      { label: 'TERAZ', note: 'Bieżący stan miasta.' },
+      { label: '1 ROK', note: 'Przy utrzymaniu kierunku zmian – przybliżenie.' },
+      { label: '5 LAT', note: 'Długoterminowy wpływ trudny do przewidzenia.' },
+      { label: '10 LAT', note: 'Za daleko w przyszłość – pomijamy.' },
     ],
     estimatedResidents: 0,
     estimatedJobs: 0,
@@ -199,10 +199,10 @@ export function previewDisasterReport(p: {
 }): ConsequenceReport {
   return {
     title: `Scenariusz: ${p.label}`,
-    summary: `Promień ~${Math.round(p.radius)} m · ${p.roads} odcinków zagrożonych · koszt ${formatBudgetPln(p.cost)} (szacunek modelu).`,
+    summary: `Promień ~${Math.round(p.radius)} m · ${p.roads} ulic zagrożonych · koszt ${formatBudgetPln(p.cost)}.`,
     observations: [
       {
-        text: `Potencjalnie dotkniętych ok. ${p.estimatedAffected} mieszkańców (szacunek – nie spis powszechny).`,
+        text: `Potencjalnie dotkniętych ok. ${p.estimatedAffected} mieszkańców.`,
         kind: 'warn',
         confidence: 'niska',
       },
@@ -215,15 +215,15 @@ export function previewDisasterReport(p: {
     impacts: [
       { label: 'Mieszkańcy', level: levelFromAbs(p.estimatedAffected, 80, 400), delta: `~${p.estimatedAffected}` },
       { label: 'Ruch', level: p.effects.speed < 0.8 ? 'HIGH' : 'MEDIUM', delta: `×${p.effects.speed.toFixed(2)}` },
-      { label: 'Infrastruktura', level: p.roads > 5 ? 'HIGH' : 'MEDIUM', delta: `${p.roads} odc.` },
+      { label: 'Infrastruktura', level: p.roads > 5 ? 'HIGH' : 'MEDIUM', delta: `${p.roads} ulic` },
       { label: 'Środowisko', level: levelFromAbs(p.effects.pollution, 5, 15), delta: `${p.effects.pollution >= 0 ? '+' : ''}${p.effects.pollution}` },
       { label: 'Koszt', level: levelFromAbs(p.cost, 600_000, 1_200_000), delta: formatBudgetPln(p.cost) },
     ],
     horizons: [
-      { label: 'TERAZ', note: 'Scenariusz jeszcze nie uruchomiony – zatwierdź, by zasymulować.' },
-      { label: '1 ROK', note: 'Model nie szacuje odbudowy długoterminowej.' },
-      { label: '5 LAT', note: 'Brak danych – pomijamy.' },
-      { label: '10 LAT', note: 'Brak danych – pomijamy.' },
+      { label: 'TERAZ', note: 'Scenariusz jeszcze nie uruchomiony – zatwierdź, by zacząć.' },
+      { label: '1 ROK', note: 'Odbudowa zależy od Twoich kolejnych decyzji.' },
+      { label: '5 LAT', note: 'Za daleko w przyszłość – pomijamy.' },
+      { label: '10 LAT', note: 'Za daleko w przyszłość – pomijamy.' },
     ],
     estimatedResidents: p.estimatedAffected,
     estimatedJobs: 0,

@@ -97,8 +97,8 @@ const BUS = { len: 12.0, wid: 2.55, lowH: 1.5, upH: 1.05, floor: 0.45 };
 /** Intensywność świateł pojazdów: 0 w dzień, 1 w głębokiej nocy. */
 function vehicleNightGlow(dayFactor: number): number {
   const night = Math.max(0, 1 - dayFactor);
-  if (night < 0.32) return 0;
-  return Math.min(1, (night - 0.32) / 0.5);
+  if (night < 0.18) return 0;
+  return Math.min(1, (night - 0.18) / 0.42);
 }
 
 function makeGlowMat(color: string) {
@@ -176,8 +176,8 @@ export function TramFleet({ get, sim, capacity = 200, onPick, selected }: {
     if (glowAcc.current >= 0.12) {
       glowAcc.current = 0;
       const g = vehicleNightGlow(sim.dayFactor());
-      hlMat.opacity = g * 0.95;
-      tlMat.opacity = g * 0.85;
+      hlMat.opacity = g * 1;
+      tlMat.opacity = g * 0.95;
       hlMat.visible = tlMat.visible = g > 0.02;
     }
   });
@@ -256,8 +256,8 @@ export function BusFleet({ get, sim, capacity = 240, onPick }: {
     if (glowAcc.current >= 0.12) {
       glowAcc.current = 0;
       const g = vehicleNightGlow(sim.dayFactor());
-      hlMat.opacity = g * 0.95;
-      tlMat.opacity = g * 0.85;
+      hlMat.opacity = g * 1;
+      tlMat.opacity = g * 0.95;
       hlMat.visible = tlMat.visible = g > 0.02;
     }
   });
@@ -281,8 +281,8 @@ export function CarFleet({ get, sim, capacity = 320 }: { get: () => FleetPose[];
     low: mk(new RoundedBoxGeometry(4.3, 0.92, 1.84, 2, 0.22), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.32, metalness: 0.3 }), capacity),
     cab: mk(new RoundedBoxGeometry(2.2, 0.8, 1.7, 2, 0.24), new THREE.MeshStandardMaterial({ color: '#1d242b', roughness: 0.2, metalness: 0.5 }), capacity),
     wheels: mk(new THREE.BoxGeometry(3.3, 0.62, 1.94), new THREE.MeshStandardMaterial({ color: '#141618', roughness: 0.95 }), capacity, false),
-    hlL: mk(new THREE.BoxGeometry(0.22, 0.18, 0.35), hlMat, capacity, false),
-    hlR: mk(new THREE.BoxGeometry(0.22, 0.18, 0.35), hlMat, capacity, false),
+    hlL: mk(new THREE.BoxGeometry(0.32, 0.24, 0.42), hlMat, capacity, false),
+    hlR: mk(new THREE.BoxGeometry(0.32, 0.24, 0.42), hlMat, capacity, false),
   }), [capacity, hlMat]);
 
   const acc = useRef(0);
@@ -307,7 +307,7 @@ export function CarFleet({ get, sim, capacity = 320 }: { get: () => FleetPose[];
     acc.current += dt;
     if (acc.current >= 0.12) {
       acc.current = 0;
-      hlMat.opacity = glow * 0.95;
+      hlMat.opacity = glow * 1;
       hlMat.visible = glow > 0.02;
     }
   });

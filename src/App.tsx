@@ -41,10 +41,9 @@ export default function App() {
   if (error) {
     return (
       <div className="boot">
-        <h1>Brak danych</h1>
-        <p>Nie udało się wczytać wypieczonego zestawu danych Krakowa.</p>
+        <h1>Krakopolis</h1>
+        <p>Nie udało się wczytać miasta. Odśwież stronę lub spróbuj później.</p>
         <pre>{error}</pre>
-        <p>Uruchom <code>npm run ingest</code>, aby pobrać dane z OpenStreetMap i ZTP Kraków.</p>
       </div>
     );
   }
@@ -52,7 +51,7 @@ export default function App() {
     return (
       <div className="boot">
         <h1>Krakopolis</h1>
-        <p>Wczytuję dane: OpenStreetMap, GTFS i GTFS-RT ZTP Kraków…</p>
+        <p>Wczytuję Kraków…</p>
       </div>
     );
   }
@@ -482,7 +481,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
           e.preventDefault();
           setMsg((m) => ({
             id: m.id + 1,
-            text: 'Budynków OSM nie można zburzyć — tylko budynki gracza.',
+            text: 'Tego budynku nie można zburzyć — tylko budynki, które sam postawiłeś.',
           }));
           return;
         }

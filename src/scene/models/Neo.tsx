@@ -197,7 +197,7 @@ export function NeoCard({ onClose }: { onClose: () => void }) {
       <p className="sub">Mieszkaniec</p>
       <dl>
         <dt>Status</dt>
-        <dd><span className="tag simulated">SIMULATED</span></dd>
+        <dd>mieszkaniec</dd>
         <dt>Opis</dt>
         <dd>Od czasu do czasu zadaje dziwne pytania.</dd>
       </dl>

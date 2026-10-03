@@ -110,16 +110,21 @@ function DayNight({ sim }: { sim: Sim }) {
       scene.fog.density = 0.00038 + (1 - day) * 0.00022;
     }
 
+    const night = 1 - day;
     if (hemi.current) {
-      hemi.current.color.set(day > 0.35 ? '#f4f7fb' : '#7a88a8');
-      hemi.current.groundColor.set(day > 0.3 ? '#8a8578' : '#1c1a22');
-      hemi.current.intensity = 0.35 + day * 0.45;
+      hemi.current.color.set(day > 0.35 ? '#f4f7fb' : '#8a96b8');
+      hemi.current.groundColor.set(day > 0.3 ? '#8a8578' : '#2a2430');
+      // Noc: trochę ciepłego światła miasta zamiast czarnej dziury.
+      hemi.current.intensity = 0.28 + day * 0.52 + night * 0.12;
     }
-    if (amb.current) amb.current.intensity = 0.18 + day * 0.22;
+    if (amb.current) {
+      amb.current.intensity = 0.16 + day * 0.24 + night * 0.14;
+      amb.current.color.set(day > 0.4 ? '#ffffff' : '#ffd8a8');
+    }
     if (sun.current) {
       sun.current.position.set(Math.sin(az) * 480, 90 + elev * 620, Math.cos(az) * 400);
-      sun.current.intensity = 0.2 + day * 0.85;
-      sun.current.color.set(day > 0.55 ? '#fff6ea' : day > 0.28 ? '#ffc090' : '#9aa8cc');
+      sun.current.intensity = 0.12 + day * 0.9;
+      sun.current.color.set(day > 0.55 ? '#fff6ea' : day > 0.28 ? '#ffc090' : '#6a78a0');
     }
   });
 

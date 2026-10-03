@@ -9,17 +9,17 @@ export interface LayerDef {
 }
 
 export const LAYERS: LayerDef[] = [
-  { id: 'base', label: 'Podłoże i zieleń', hint: 'Teren, parki i woda z OpenStreetMap', defaultOn: true },
-  { id: 'basemap', label: 'Mapa satelitarna', hint: 'Ortofotomapa (Esri) pod miastem – drogi i budynki na realnym podkładzie', defaultOn: true },
-  { id: 'trees', label: 'Drzewa', hint: 'Drzewa i krzewy na terenach zielonych z OSM (parki, Planty, skwery)', defaultOn: true },
-  { id: 'roads', label: 'Sieć drogowa', hint: 'Realne ulice z OSM', defaultOn: true },
-  { id: 'traffic', label: 'Kolor ruchu', hint: 'Obciążenie odcinków (baseline / predykcja / symulacja)', defaultOn: true },
-  { id: 'buildings', label: 'Budynki 3D', hint: 'Bryły z prawdziwych obrysów OSM', defaultOn: true },
-  { id: 'transit', label: 'Transport MPK', hint: 'Trasy, przystanki i pojazdy symulowane na GTFS', defaultOn: true },
-  { id: 'live', label: 'Realne pojazdy (LIVE)', hint: 'Pojazdy z GTFS-RT – dane OBSERVED', defaultOn: true, observed: true },
-  { id: 'pedestrians', label: 'Piesi', hint: 'Agenci symulacji (SIMULATED)', defaultOn: true },
-  { id: 'pedflow', label: 'Ruch pieszy (heatmap)', hint: 'Natężenie pieszych na odcinkach – SIMULATED', defaultOn: false },
-  { id: 'labels', label: 'Nazwy i mapy', hint: 'Etykiety miejsc – wyłączone domyślnie (kosztowne)', defaultOn: false, observed: true },
+  { id: 'base', label: 'Podłoże i zieleń', hint: 'Teren, parki i woda', defaultOn: true },
+  { id: 'basemap', label: 'Mapa satelitarna', hint: 'Zdjęcie miasta pod budynkami', defaultOn: true },
+  { id: 'trees', label: 'Drzewa', hint: 'Drzewa w parkach i na skwerach', defaultOn: true },
+  { id: 'roads', label: 'Sieć drogowa', hint: 'Ulice Krakowa', defaultOn: true },
+  { id: 'traffic', label: 'Kolor ruchu', hint: 'Jak bardzo zatłoczone są ulice', defaultOn: true },
+  { id: 'buildings', label: 'Budynki 3D', hint: 'Bryły budynków', defaultOn: true },
+  { id: 'transit', label: 'Transport MPK', hint: 'Trasy, przystanki i pojazdy', defaultOn: true },
+  { id: 'live', label: 'Pojazdy na żywo', hint: 'Prawdziwe tramwaje i autobusy jadące teraz', defaultOn: true, observed: true },
+  { id: 'pedestrians', label: 'Piesi', hint: 'Przechodnie na ulicach', defaultOn: true },
+  { id: 'pedflow', label: 'Ruch pieszy', hint: 'Gdzie chodzi najwięcej ludzi', defaultOn: false },
+  { id: 'labels', label: 'Nazwy miejsc', hint: 'Podpisy na mapie', defaultOn: false, observed: true },
   { id: 'disasters', label: 'Katastrofy i zniszczenia', hint: 'Pożar, powódź, blackout, trzęsienie ziemi', defaultOn: true },
 ];
 

@@ -11,15 +11,15 @@ export interface AnalysisLayerDef {
 }
 
 export const ANALYSIS_LAYERS: AnalysisLayerDef[] = [
-  { id: 'ax-traffic', label: 'Natężenie ruchu', hint: 'Obciążenie odcinków z modelu ruchu', mapLayer: 'traffic', estimate: true },
-  { id: 'ax-schools', label: 'Dostęp do szkół', hint: 'Szacunek odległości do obiektów edukacyjnych', estimate: true },
-  { id: 'ax-services', label: 'Dostęp do usług', hint: 'Szacunek dostępu do sklepów i biur', estimate: true },
+  { id: 'ax-traffic', label: 'Natężenie ruchu', hint: 'Jak zatłoczone są ulice', mapLayer: 'traffic', estimate: true },
+  { id: 'ax-schools', label: 'Dostęp do szkół', hint: 'Jak daleko do szkół i przedszkoli', estimate: true },
+  { id: 'ax-services', label: 'Dostęp do usług', hint: 'Jak daleko do sklepów i biur', estimate: true },
   { id: 'ax-transit', label: 'Dostęp do transportu', hint: 'Przystanki i trasy MPK', mapLayer: 'transit', estimate: false },
-  { id: 'ax-density', label: 'Gęstość mieszkańców', hint: 'Przybliżenie z zabudowy (szacunek)', estimate: true },
-  { id: 'ax-infra', label: 'Obciążenie infrastruktury', hint: 'Predykcja obciążenia sieci', mapLayer: 'traffic', estimate: true },
-  { id: 'ax-flood', label: 'Ryzyko powodzi', hint: 'Scenariusz modelu – nie mapa zagrożeń IMGW', estimate: true },
-  { id: 'ax-fire', label: 'Ryzyko pożaru', hint: 'Scenariusz modelu – nie dane PSP', estimate: true },
-  { id: 'ax-problem', label: 'Obszary problemowe', hint: 'Wysokie obciążenie + niska satysfakcja (szacunek)', estimate: true },
+  { id: 'ax-density', label: 'Gęstość mieszkańców', hint: 'Gdzie mieszka najwięcej ludzi', estimate: true },
+  { id: 'ax-infra', label: 'Obciążenie infrastruktury', hint: 'Jak bardzo obciążona jest sieć', mapLayer: 'traffic', estimate: true },
+  { id: 'ax-flood', label: 'Ryzyko powodzi', hint: 'Scenariusz powodzi w grze', estimate: true },
+  { id: 'ax-fire', label: 'Ryzyko pożaru', hint: 'Scenariusz pożaru w grze', estimate: true },
+  { id: 'ax-problem', label: 'Obszary problemowe', hint: 'Duży ruch i niskie zadowolenie', estimate: true },
 ];
 
 export type AnalysisId = (typeof ANALYSIS_LAYERS)[number]['id'];
@@ -38,33 +38,33 @@ export function analysisTooltip(
     return {
       title: high ? 'WYSOKIE OBCIĄŻENIE' : pct >= 45 ? 'ŚREDNIE OBCIĄŻENIE' : 'NISKIE OBCIĄŻENIE',
       lines: [
-        `${pct}% przepustowości (szacunek modelu)`,
-        `${delta >= 0 ? '+' : ''}${delta}% względem baseline`,
+        `${pct}% zatłoczenia`,
+        `${delta >= 0 ? '+' : ''}${delta}% względem teraz`,
       ],
     };
   }
   if (analysis.has('ax-flood')) {
     return {
       title: 'RYZYKO POWODZI',
-      lines: ['Scenariusz modelu – nie oficjalna mapa zagrożeń.', 'Pewność: niska'],
+      lines: ['Scenariusz w grze – nie oficjalna mapa zagrożeń.'],
     };
   }
   if (analysis.has('ax-fire')) {
     return {
       title: 'RYZYKO POŻARU',
-      lines: ['Scenariusz modelu – nie dane PSP.', 'Pewność: niska'],
+      lines: ['Scenariusz w grze.'],
     };
   }
   if (analysis.has('ax-schools') || analysis.has('ax-services') || analysis.has('ax-density')) {
     return {
-      title: 'SZACUNEK DOSTĘPNOŚCI',
-      lines: ['Wartość przybliżona z lokalnego modelu.', 'Pewność: niska / średnia'],
+      title: 'DOSTĘPNOŚĆ',
+      lines: ['Wartość przybliżona.'],
     };
   }
   if (analysis.has('ax-transit')) {
     return {
       title: 'TRANSPORT',
-      lines: ['Warstwa GTFS / symulacja MPK'],
+      lines: ['Przystanki i linie MPK'],
     };
   }
   return null;

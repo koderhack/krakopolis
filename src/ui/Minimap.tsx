@@ -242,7 +242,7 @@ export function Minimap({
         onClick={click}
         title="OpenStreetMap · kliknij, aby przenieść kamerę"
       />
-      <span className="minimap-attr">© OSM</span>
+      <span className="minimap-attr">© OpenStreetMap</span>
       <button type="button" className="minimap-fit" onClick={onFitCity} title="Pokaż całe miasto (N)">
         Całe miasto
       </button>
