@@ -558,6 +558,21 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
   );
 });
 
+/**
+ * GTFS bearing: 0° = północ, 90° = wschód (zgodnie z zegarem).
+ * Lokalnie: +X = wschód, +Z = południe → yaw Three.js (długość bryły w +X)
+ * to atan2(cos(b), sin(b)), nie surowy bearing.
+ */
+function yawFromBearing(bearingDeg: number): number {
+  const b = (bearingDeg * Math.PI) / 180;
+  return Math.atan2(Math.cos(b), Math.sin(b));
+}
+
+function yawFromDelta(dx: number, dz: number, fallback: number): number {
+  if (dx * dx + dz * dz < 0.04) return fallback;
+  return Math.atan2(-dz, dx);
+}
+
 /** Realne pojazdy MPK z GTFS-RT – pozycja prosto z feedu. */
 function RealFleet({ sim, onPick, selected, layers }: {
   sim: Sim; onPick: CitySceneProps['onPickVehicle']; selected: string | null; layers: Set<string>;
@@ -578,8 +593,15 @@ function RealFleet({ sim, onPick, selected, layers }: {
     const f = fresh ? 0.55 : Math.min(1, dt * 1.6);
     trams.length = 0; buses.length = 0;
     for (const v of src) {
-      const yaw = ((v.bearing ?? 0) * Math.PI) / 180;
       const p = prev.current.get(v.id);
+      let yaw: number;
+      if (v.bearing != null && Number.isFinite(v.bearing)) {
+        yaw = yawFromBearing(v.bearing);
+      } else if (p) {
+        yaw = yawFromDelta(v.x - p.x, v.z - p.z, p.yaw);
+      } else {
+        yaw = 0;
+      }
       if (p) {
         let dy = yaw - p.yaw;
         while (dy > Math.PI) dy -= Math.PI * 2;
@@ -618,14 +640,23 @@ function SimFleet({ sim, layers }: { sim: Sim; layers: Set<string> }) {
     trams.length = 0;
     buses.length = 0;
     cars.length = 0;
+    // Gdy live GTFS jest widoczny, nie dubluj MPK (SIMULATED + OBSERVED na sobie).
+    const liveOk = Math.abs(sim.clockOffsetMs) < 5 * 60_000;
+    const hideSimTransit = (layers.has('live') || layers.has('transit'))
+      && liveOk
+      && sim.realVehicles.length > 0;
     for (const v of sim.veh) {
-      const p: FleetPose = {
-        id: `${v.kind}-${v.edge}`,
-        x: v.x, z: v.z, yaw: v.yaw, ref: v.ref,
-      };
-      if (v.kind === 2) trams.push(p);
-      else if (v.kind === 1) buses.push(p);
-      else cars.push(p);
+      if (v.kind === 2) {
+        if (hideSimTransit) continue;
+        const e = sim.roads[v.edge]?.edge;
+        if (!e || (e.roadClass !== 'tram' && !e.hasTram)) continue;
+        trams.push({ id: `tram-${v.edge}-${Math.round(v.s)}`, x: v.x, z: v.z, yaw: v.yaw, ref: v.ref });
+      } else if (v.kind === 1) {
+        if (hideSimTransit) continue;
+        buses.push({ id: `bus-${v.edge}-${Math.round(v.s)}`, x: v.x, z: v.z, yaw: v.yaw, ref: v.ref });
+      } else {
+        cars.push({ id: `car-${v.edge}-${Math.round(v.s)}`, x: v.x, z: v.z, yaw: v.yaw, ref: v.ref });
+      }
     }
   });
   return (

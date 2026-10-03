@@ -657,10 +657,28 @@ export class Sim {
     }
     if (v.stuck > 0) { v.stuck--; return; }
     if (!v.nodes.length && !this.pickDest(v, node)) return;
+
+    if (v.kind === TRAM) {
+      // Pomiń skoki GTFS bez torowiska; zostań tylko na hasTram / roadClass tram.
+      while (v.nodes.length) {
+        const nx = v.nodes.shift()!;
+        const id = this.edgeBetween(node, nx);
+        if (id === undefined) { node = nx; continue; }
+        const ed = this.roads[id]?.edge;
+        if (!ed || (ed.roadClass !== 'tram' && !ed.hasTram)) { node = nx; continue; }
+        v.edge = id;
+        v.dir = ed.a === node ? 1 : -1;
+        v.s = over;
+        return;
+      }
+      this.respawn(v);
+      return;
+    }
+
     const nx = v.nodes.shift()!;
     const id = this.edgeBetween(node, nx);
     if (id === undefined) {
-      // Grac zamknął odcinek trasy – wracamy do początku kursu i jedziemy dalej.
+      // Gracz zamknął odcinek trasy – wracamy do początku kursu i jedziemy dalej.
       v.nodes = v.kind === CAR ? [] : v.route.slice(1);
       v.dest = v.kind === CAR ? -1 : (v.route[1] ?? -1);
       v.si = 0;
@@ -674,7 +692,12 @@ export class Sim {
   private move(v: Veh, dt: number) {
     if (v.kind !== CAR) this.vehRoute = v.route;
     const r = this.roads[v.edge];
+    if (!r?.edge) { this.respawn(v); return; }
     const e = r.edge;
+    if (v.kind === TRAM && e.roadClass !== 'tram' && !e.hasTram) {
+      this.respawn(v);
+      return;
+    }
     if (v.dwell > 0) { v.speed *= 0.85; v.dwell -= dt; }
     else {
       if (r.destroyed || r.closure === 'closed') { v.speed = 0; v.dwell = Math.max(v.dwell, 1); return; }
@@ -751,9 +774,11 @@ export class Sim {
     const e = this.roads[v.edge].edge;
     const t = v.dir > 0 ? v.s : e.len - v.s;
     const off = v.kind === TRAM ? 0 : v.kind === BUS ? 2.4 : 2.0;
+    // Kierunek jazdy = hx/hz krawędzi × dir (tramwaj bez offsetu bocznego – na osi toru).
     const hx = e.hx * v.dir, hz = e.hz * v.dir;
     v.x = e.ax + e.hx * t - hz * off;
     v.z = e.az + e.hz * t + hx * off;
+    // Mesh ma długość w +X; po rotacji Y forward = (cos yaw, -sin yaw) = (hx, hz).
     v.yaw = Math.atan2(-hz, hx);
   }
 
