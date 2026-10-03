@@ -266,7 +266,8 @@ export class Sim {
 
     const stopsByRoad = new Map<number, { roadId: number; name: string; lines: string[] }>();
     for (const s of city.stops) {
-      if (s.roadId === undefined) continue;
+      // przystanek bez odcinka (np. po naprawie grafu) nie może dostać się do symulacji
+      if (s.roadId === undefined || s.roadId < 0 || s.roadId >= city.roads.length) continue;
       const cur = stopsByRoad.get(s.roadId);
       if (cur) cur.lines = [...new Set([...cur.lines, ...s.lines])];
       else stopsByRoad.set(s.roadId, { roadId: s.roadId, name: s.name, lines: [...s.lines] });
@@ -308,6 +309,9 @@ export class Sim {
         rs.transit = r.transit;
       });
     }
+    // Odcinek bez krawędzi w grafie nie jest widoczny w symulacji – pomijamy go,
+    // inaczej jedna uszkodzona dana wywraca całą aplikację.
+    this.roads = this.roads.filter((rs): rs is RoadSim => !!rs?.edge);
     for (const rs of this.roads) rs.realStop = stopsByRoad.has(rs.edge.id);
 
     this.reweight();

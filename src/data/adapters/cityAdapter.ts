@@ -29,7 +29,7 @@ export interface BakedBundle {
  */
 export function buildCityData(b: BakedBundle): CityData {
   const stops: SimStop[] = b.transit.stops.map((s: BakedStop) => ({
-    id: s.id, name: s.name, x: s.x, z: s.z, lat: s.lat, lon: s.lon, roadId: s.roadId, lines: s.lines, mode: s.mode,
+    id: s.id, name: s.name, x: s.x, z: s.z, lat: s.lat, lon: s.lon, roadId: s.roadId ?? -1, lines: s.lines, mode: s.mode,
   }));
 
   const routes: SimRoute[] = b.transit.routes.map((r, index) => ({
@@ -93,6 +93,16 @@ export function buildCityData(b: BakedBundle): CityData {
   const corridor = new RoadCorridor(b.city.nodes, roads);
   let trimmed = 0, dropped = 0;
   const network = repairNetwork(b.city.nodes, roads);
+  // Przystanki z GTFS wskazują odcinki sprzed naprawy grafu. Jeśli odcinek
+  // zniknął jako duplikat, doczepiamy przystanek do najbliższej ulicy –
+  // inaczej tramwaj zniknąłby z trasy tylko dlatego, że ulica występuje w OSM
+  // dwukrotnie (dwa pasy ruchu).
+  for (const st of stops) {
+    const to = network.remap.get(st.roadId ?? -1);
+    if (to !== undefined) { st.roadId = to; continue; }
+    st.roadId = nearestRoadTo(network.roads, b.city.nodes, st.x, st.z, 60);
+  }
+  const roadCount = network.roads.length;
   const buildings: SimBuilding[] = [];
   for (const x of b.city.buildings) {
     const fit = corridor.fit(x);
@@ -131,7 +141,7 @@ export function buildCityData(b: BakedBundle): CityData {
       dataTimestamp: b.city.generatedAt,
       fetchedAt: b.city.generatedAt,
       records: b.city.roads.length,
-      note: `Drogi: ${b.city.roads.length}, budynki: ${buildings.length}`
+      note: `Drogi: ${roadCount}${network.duplicates ? ` (usunięto ${network.duplicates} duplikatów, dociągnięto ${network.snapped} końców)` : ''}, budynki: ${buildings.length}`
         + (trimmed || dropped ? ` (przyciętych do pasa drogowego: ${trimmed}, odrzuconych: ${dropped})` : '')
         + `, skrzyżowania: ${b.city.signals.length}, miejsca: ${pois.length}.`,
     },
@@ -209,7 +219,7 @@ function estimateFromRoadClass(r: { roadClass: string; lanesForward: number; car
  * zbliżeniu zostają wiszące – na mapie wygląda to na „rozwaloną" siatkę.
  * Naprawa jest czysto pochodna: nie ruszamy danych źródłowych.
  */
-function repairNetwork(nodes: SimNode[], roads: SimRoad[]): { roads: SimRoad[]; duplicates: number; snapped: number } {
+function repairNetwork(nodes: SimNode[], roads: SimRoad[]): { roads: SimRoad[]; remap: Map<number, number>; duplicates: number; snapped: number } {
   // 1. duplikaty: ta sama para węzłów – zostaje jeden (z torowiskiem, jeśli było)
   const best = new Map<string, SimRoad>();
   let duplicates = 0;
@@ -256,7 +266,25 @@ function repairNetwork(nodes: SimNode[], roads: SimRoad[]): { roads: SimRoad[]; 
       }
     }
   }
-  return { roads: out, duplicates, snapped };
+  // Po usunięciu duplikatów indeksy się przesunęły, a przystanki z GTFS
+  // trzymają stare numery odcinków. Numerujemy od nowa i zwracamy mapę,
+  // żeby przystanki dalej wskazywały właściwe ulice.
+  const remap = new Map<number, number>();
+  out.forEach((r, i) => { remap.set(r.id, i); r.id = i; });
+
+  return { roads: out, remap, duplicates, snapped };
+}
+
+/** Najbliższy odcinek drogi w promieniu – awaryjnie dla przystanków po remoncie grafu. */
+function nearestRoadTo(roads: SimRoad[], nodes: SimNode[], x: number, z: number, maxDist: number): number {
+  let best = -1, bd = maxDist;
+  for (const r of roads) {
+    const a = nodes[r.a], c = nodes[r.b];
+    if (!a || !c) continue;
+    const d = distToSegment(x, z, a.x, a.z, c.x, c.z);
+    if (d < bd) { bd = d; best = r.id; }
+  }
+  return best;
 }
 
 /**
