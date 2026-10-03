@@ -1,5 +1,5 @@
 {
-  "name": "simcity-krakow",
+  "name": "krakopolis",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -7,7 +7,7 @@
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && wrangler pages deploy dist --project-name=miasto-krakow",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=krakopolis",
     "sim:test": "tsx scripts/sim-test.ts",
     "ingest": "tsx scripts/ingest.ts",
     "basemap": "tsx scripts/basemap.ts"

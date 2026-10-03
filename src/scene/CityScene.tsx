@@ -5,15 +5,14 @@
  * z torowiskami, budynki z prawdziwych obrysów, przystanki GTFS, pojazdy
  * (realne z GTFS-RT + symulowane), piesi, obiekty gracza i katastrofy.
  */
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
-import { MapControls } from '@react-three/drei';
+import { memo, useEffect, useMemo, useRef } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import type { Sim } from '../simulation/sim';
 import type { CityData } from '../data/model';
 import { toLocal } from '../data/geo';
 import { HeightField, setHeightField } from './terrain';
-import { Html } from '@react-three/drei';
 import {
   areaExtent, Buildings, Closures, DisasterLayer, MapBorder, PlayerParks, PlayerStructures,
   RoadNetwork, Terrain, TrafficView, TransitStops, Trees,
@@ -147,9 +146,9 @@ function DayNight({ sim }: { sim: Sim }) {
 }
 
 /**
- * Obsługa kamery w stylu city-buildera:
- * LPM = przesuwanie, PPM = obrót, Shift+PPM = pochylenie, scroll = zoom.
- * Jednym źródłem prawdy jest `MapControls.target`.
+ * Obsługa kamery (klasyczne OrbitControls):
+ * LPM = obrót, PPM / środkowy = przesuwanie, Shift+PPM = pochylenie, scroll = zoom.
+ * Jednym źródłem prawdy jest `OrbitControls.target`.
  */
 function Rig({
   focus, flyTo, topDown, onBounds, mapBounds, onCameraSample,
@@ -355,18 +354,18 @@ function Rig({
   });
 
   return (
-    <MapControls
+    <OrbitControls
       ref={ctl} makeDefault enableDamping dampingFactor={0.085}
       minPolarAngle={0.18} maxPolarAngle={Math.PI * 0.48}
       minDistance={35} maxDistance={2400}
       zoomSpeed={0.85} rotateSpeed={0.55} panSpeed={1.05}
       screenSpacePanning={false}
       mouseButtons={{
-        LEFT: THREE.MOUSE.PAN,
-        MIDDLE: THREE.MOUSE.DOLLY,
-        RIGHT: THREE.MOUSE.ROTATE,
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.PAN,
+        RIGHT: THREE.MOUSE.PAN,
       }}
-      touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE }}
+      touches={{ ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }}
       target={[focus[0], 0, focus[1]]}
       onStart={() => { tween.current = null; ctl.current && (ctl.current.enabled = true); }}
     />
@@ -408,40 +407,126 @@ function DisasterGhost({ preview }: { preview: { x: number; z: number; radius: n
 }
 
 /**
- * Etykiety miejsc – warstwa „mapy".
- * Pokazujemy tylko te, które są w zasięgu kamery (limit 90), bo każda etykieta
- * to osobny element DOM i setki ich narastają przy każdym ruchu kamery.
+ * Etykiety miejsc – lekki overlay DOM (nie 90× drei Html).
+ * Max kilka najbliższych, tylko przy zbliżeniu; aktualizacja throttlowana.
  */
-function Labels({ city, ver }: { city: CityData; ver: number }) {
-  const { camera } = useThree();
-  const [near, setNear] = useState<{ x: number; z: number; name: string; category: string }[]>([]);
+const LABEL_MAX = 10;
+const LABEL_NEAR = 780;
+const LABEL_REFRESH = 0.85;
+
+function Labels({ city }: { city: CityData; ver: number }) {
+  const { camera, gl } = useThree();
+  const root = useRef<HTMLDivElement | null>(null);
+  const nodes = useRef<HTMLDivElement[]>([]);
   const acc = useRef(0);
+  const scratch = useMemo(() => ({
+    dir: new THREE.Vector3(),
+    v: new THREE.Vector3(),
+    lastKey: '',
+  }), []);
+
+  useEffect(() => {
+    const parent = gl.domElement.parentElement;
+    if (!parent) return;
+    const el = document.createElement('div');
+    el.className = 'lbl-overlay';
+    el.setAttribute('aria-hidden', 'true');
+    parent.appendChild(el);
+    root.current = el;
+    nodes.current = [];
+    for (let i = 0; i < LABEL_MAX; i++) {
+      const n = document.createElement('div');
+      n.className = 'lbl poi';
+      n.style.display = 'none';
+      n.innerHTML = '<b></b><span></span>';
+      el.appendChild(n);
+      nodes.current.push(n);
+    }
+    return () => {
+      el.remove();
+      root.current = null;
+      nodes.current = [];
+    };
+  }, [gl]);
+
   useFrame((_, dt) => {
+    const overlay = root.current;
+    if (!overlay) return;
     acc.current += dt;
-    if (acc.current < 1) return;
+    if (acc.current < LABEL_REFRESH) return;
     acc.current = 0;
-    // wybieramy miejsca najbliższe punktowi, na który patrzy kamera
-    const target = camera.getWorldDirection(new THREE.Vector3());
-    const cx = camera.position.x + target.x * 900;
-    const cz = camera.position.z + target.z * 900;
-    const pois = city.pois ?? [];
-    const scored = pois
-      .map((p) => ({ p, d: Math.hypot(p.x - cx, p.z - cz) }))
-      .sort((a, b) => a.d - b.d)
-      .slice(0, 90);
-    const next = scored.map((s) => ({ x: s.p.x, z: s.p.z, name: s.p.name, category: s.p.category }));
-    setNear((prev) => (prev.length === next.length && prev.every((p, i) => p.name === next[i].name && p.x === next[i].x) ? prev : next));
+
+    const dist = camera.position.y;
+    if (dist > 520) {
+      if (scratch.lastKey !== 'off') {
+        for (const n of nodes.current) n.style.display = 'none';
+        scratch.lastKey = 'off';
+      }
+      return;
+    }
+
+    camera.getWorldDirection(scratch.dir);
+    const look = Math.min(LABEL_NEAR, 180 + dist * 1.1);
+    const cx = camera.position.x + scratch.dir.x * look;
+    const cz = camera.position.z + scratch.dir.z * look;
+    const pois = city.pois;
+    if (!pois?.length) {
+      for (const n of nodes.current) n.style.display = 'none';
+      scratch.lastKey = 'empty';
+      return;
+    }
+
+    // Selection sort top-K zamiast pełnego sortu całej listy.
+    const top: { i: number; d: number }[] = [];
+    for (let i = 0; i < pois.length; i++) {
+      const p = pois[i];
+      if (!p.name) continue;
+      const d = (p.x - cx) * (p.x - cx) + (p.z - cz) * (p.z - cz);
+      if (d > LABEL_NEAR * LABEL_NEAR) continue;
+      if (top.length < LABEL_MAX) {
+        top.push({ i, d });
+        if (top.length === LABEL_MAX) top.sort((a, b) => a.d - b.d);
+      } else if (d < top[LABEL_MAX - 1].d) {
+        top[LABEL_MAX - 1] = { i, d };
+        top.sort((a, b) => a.d - b.d);
+      }
+    }
+
+    const rect = gl.domElement.getBoundingClientRect();
+    const key = top.map((t) => t.i).join(',');
+    const keyChanged = key !== scratch.lastKey;
+    scratch.lastKey = key;
+
+    let shown = 0;
+    for (let k = 0; k < LABEL_MAX; k++) {
+      const n = nodes.current[k];
+      if (!n) continue;
+      if (k >= top.length) {
+        n.style.display = 'none';
+        continue;
+      }
+      const p = pois[top[k].i];
+      scratch.v.set(p.x, 18, p.z).project(camera);
+      if (scratch.v.z > 1 || scratch.v.x < -1.05 || scratch.v.x > 1.05 || scratch.v.y < -1.05 || scratch.v.y > 1.05) {
+        n.style.display = 'none';
+        continue;
+      }
+      const sx = (scratch.v.x * 0.5 + 0.5) * rect.width;
+      const sy = (-scratch.v.y * 0.5 + 0.5) * rect.height;
+      n.style.display = 'block';
+      n.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%)`;
+      if (keyChanged) {
+        const b = n.querySelector('b');
+        const s = n.querySelector('span');
+        if (b) b.textContent = p.name;
+        if (s) s.textContent = p.category;
+      }
+      shown++;
+    }
+    void shown;
   });
-  void ver;
-  return (
-    <group>
-      {near.map((p, i) => (
-        <Html key={i} position={[p.x, 22, p.z]} center distanceFactor={1200} zIndexRange={[8, 0]} style={{ pointerEvents: 'none' }}>
-          <div className="lbl poi"><b>{p.name}</b><span>{p.category}</span></div>
-        </Html>
-      ))}
-    </group>
-  );
+
+  return null;
 }
 
 /** Heatmapa ruchu pieszego – wartości z agentów symulacji. */
@@ -523,7 +608,7 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
           onGround={p.onGround} onClear={() => p.onSelect(null)} />
       )}
       <MapBorder area={city.area} />
-      {p.layers.has('trees') && <Trees key={`trees-${staticKey}`} polygons={city.polygons} ver={p.ver} />}
+      {p.layers.has('trees') && <Trees key={`trees-${staticKey}`} polygons={city.polygons} area={city.area} ver={p.ver} />}
       {p.layers.has('buildings') && (
         <Buildings key={`bld-${staticKey}-${hiddenKey}`} buildings={city.buildings} hiddenKey={hiddenKey} ver={p.ver}
           onSelect={(i) => p.onSelect({ kind: 'building', id: i })}

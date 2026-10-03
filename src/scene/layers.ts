@@ -19,7 +19,7 @@ export const LAYERS: LayerDef[] = [
   { id: 'live', label: 'Realne pojazdy (LIVE)', hint: 'Pojazdy z GTFS-RT – dane OBSERVED', defaultOn: true, observed: true },
   { id: 'pedestrians', label: 'Piesi', hint: 'Agenci symulacji (SIMULATED)', defaultOn: true },
   { id: 'pedflow', label: 'Ruch pieszy (heatmap)', hint: 'Natężenie pieszych na odcinkach – SIMULATED', defaultOn: false },
-  { id: 'labels', label: 'Nazwy i mapy', hint: 'Etykiety miejsc, przystanków i ulic z OSM / GTFS', defaultOn: true, observed: true },
+  { id: 'labels', label: 'Nazwy i mapy', hint: 'Etykiety miejsc – wyłączone domyślnie (kosztowne)', defaultOn: false, observed: true },
   { id: 'disasters', label: 'Katastrofy i zniszczenia', hint: 'Pożar, powódź, blackout, trzęsienie ziemi', defaultOn: true },
 ];
 

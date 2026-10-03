@@ -3,3 +3,8 @@ dist
 .DS_Store
 *.local
 .vite.cache
+.cache/
+.wrangler/
+.env
+.env.*
+!.env.example

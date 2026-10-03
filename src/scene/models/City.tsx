@@ -34,6 +34,52 @@ function polygonGeo(ring: [number, number][], y: number) {
   return geo;
 }
 
+type LocalBBox = { minX: number; maxX: number; minZ: number; maxZ: number };
+
+/** Przycięcie pierścienia do AABB (Sutherland–Hodgman) – raz przy budowie geometrii. */
+function clipRingToBBox(ring: [number, number][], box: LocalBBox): [number, number][] {
+  const clipEdge = (
+    input: [number, number][],
+    inside: (x: number, z: number) => boolean,
+    intersect: (a: [number, number], b: [number, number]) => [number, number],
+  ): [number, number][] => {
+    if (input.length === 0) return [];
+    const out: [number, number][] = [];
+    for (let i = 0; i < input.length; i++) {
+      const cur = input[i];
+      const prev = input[(i + input.length - 1) % input.length];
+      const curIn = inside(cur[0], cur[1]);
+      const prevIn = inside(prev[0], prev[1]);
+      if (curIn) {
+        if (!prevIn) out.push(intersect(prev, cur));
+        out.push(cur);
+      } else if (prevIn) {
+        out.push(intersect(prev, cur));
+      }
+    }
+    return out;
+  };
+
+  let r = ring;
+  r = clipEdge(r, (x) => x >= box.minX, (a, b) => {
+    const t = (box.minX - a[0]) / ((b[0] - a[0]) || 1e-12);
+    return [box.minX, a[1] + t * (b[1] - a[1])];
+  });
+  r = clipEdge(r, (x) => x <= box.maxX, (a, b) => {
+    const t = (box.maxX - a[0]) / ((b[0] - a[0]) || 1e-12);
+    return [box.maxX, a[1] + t * (b[1] - a[1])];
+  });
+  r = clipEdge(r, (_x, z) => z >= box.minZ, (a, b) => {
+    const t = (box.minZ - a[1]) / ((b[1] - a[1]) || 1e-12);
+    return [a[0] + t * (b[0] - a[0]), box.minZ];
+  });
+  r = clipEdge(r, (_x, z) => z <= box.maxZ, (a, b) => {
+    const t = (box.maxZ - a[1]) / ((b[1] - a[1]) || 1e-12);
+    return [a[0] + t * (b[0] - a[0]), box.maxZ];
+  });
+  return r;
+}
+
 /** Pole powierzchni pierścienia [m²]. */
 export function ringArea(ring: [number, number][]): number {
   let a = 0;
@@ -77,13 +123,14 @@ export const Terrain = memo(function Terrain({
   const grassMap = useMemo(() => grassTex(), []);
   const [basemap, setBasemap] = useState<THREE.Texture | null>(null);
 
-  // Dokładny bbox obszaru w metrach lokalnych – podkład musi pokrywać się z OSM.
+  // Dokładny bbox obszaru w metrach lokalnych – ten sam co MapBorder.
   const mapBounds = useMemo(() => {
     const sw = toLocal(area.minLat, area.minLon);
     const ne = toLocal(area.maxLat, area.maxLon);
     const minX = Math.min(sw.x, ne.x), maxX = Math.max(sw.x, ne.x);
     const minZ = Math.min(sw.z, ne.z), maxZ = Math.max(sw.z, ne.z);
     return {
+      minX, maxX, minZ, maxZ,
       cx: (minX + maxX) / 2,
       cz: (minZ + maxZ) / 2,
       w: maxX - minX,
@@ -133,20 +180,25 @@ export const Terrain = memo(function Terrain({
     return geo;
   }, [mapBounds.w, mapBounds.d]);
 
-  // Woda: przed dodaniem Wisły rysowaliśmy tylko realne poligony OSM
-  // (natural=water) – koryto rzeki jako linia nie tworzyło wielokąta.
+  // Woda/zieleń: przycinamy do bbox MapBorder, żeby nic nie wyciekało poza czerwoną granicę.
   const { waterGeos, greenGeos } = useMemo(() => {
+    const box: LocalBBox = {
+      minX: mapBounds.minX, maxX: mapBounds.maxX,
+      minZ: mapBounds.minZ, maxZ: mapBounds.maxZ,
+    };
     const w: THREE.BufferGeometry[] = [], g: THREE.BufferGeometry[] = [];
     for (const p of polygons) {
       if (p.ring.length < 3) continue;
       if (p.kind === 'water' && ringArea(p.ring) < 5000) continue;
+      const clipped = clipRingToBBox(p.ring, box);
+      if (clipped.length < 3) continue;
       try {
-        const geo = polygonGeo(p.ring, p.kind === 'water' ? 0.1 : 0.25);
+        const geo = polygonGeo(clipped, p.kind === 'water' ? 0.1 : 0.25);
         (p.kind === 'water' ? w : g).push(geo);
       } catch { /* pomijamy uszkodzony pierścień */ }
     }
     return { waterGeos: w, greenGeos: g };
-  }, [polygons]);
+  }, [polygons, mapBounds]);
 
   useLayoutEffect(() => () => {
     for (const geo of waterGeos) geo.dispose();
@@ -827,7 +879,13 @@ export function Closures({ sim, ver }: { sim: Sim; ver: number }) {
 }
 
 /** Drzewa i krzewy wyłącznie w realnej zieleni z OSM (parki, Planty, skwery). */
-export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolygon[]; ver: number }) {
+export const Trees = memo(function Trees({
+  polygons, area, ver,
+}: {
+  polygons: SimPolygon[];
+  area: { minLat: number; maxLat: number; minLon: number; maxLon: number; origin: { lat: number; lon: number } };
+  ver: number;
+}) {
   const crown = useRef<THREE.InstancedMesh>(null);
   const trunk = useRef<THREE.InstancedMesh>(null);
   const bush = useRef<THREE.InstancedMesh>(null);
@@ -838,17 +896,27 @@ export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolyg
       seed = (Math.imul(seed ^ (seed >>> 15), 0x45d9f3b) + 1) >>> 0;
       return (seed & 0xffff) / 0x10000;
     };
+    const sw = toLocal(area.minLat, area.minLon);
+    const ne = toLocal(area.maxLat, area.maxLon);
+    const box: LocalBBox = {
+      minX: Math.min(sw.x, ne.x), maxX: Math.max(sw.x, ne.x),
+      minZ: Math.min(sw.z, ne.z), maxZ: Math.max(sw.z, ne.z),
+    };
+    const inBox = (x: number, z: number) =>
+      x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ;
     const trees: { x: number; z: number; s: number }[] = [];
     const bushes: { x: number; z: number; s: number }[] = [];
     for (const p of polygons) {
       if (p.kind !== 'green' || p.ring.length < 3) continue;
-      const area = ringArea(p.ring);
-      if (area < 40) continue;
+      const clipped = clipRingToBBox(p.ring, box);
+      if (clipped.length < 3) continue;
+      const areaM2 = ringArea(clipped);
+      if (areaM2 < 40) continue;
       // gęstość obniżona pod płynność: ~1 drzewo / 320 m²
-      const nTree = Math.min(120, Math.max(1, Math.round(area / 320)));
-      const nBush = Math.min(80, Math.round(area / 280));
+      const nTree = Math.min(120, Math.max(1, Math.round(areaM2 / 320)));
+      const nBush = Math.min(80, Math.round(areaM2 / 280));
       let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-      for (const [x, z] of p.ring) {
+      for (const [x, z] of clipped) {
         minX = Math.min(minX, x); maxX = Math.max(maxX, x);
         minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
       }
@@ -856,7 +924,7 @@ export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolyg
       while (placed < nTree && trees.length < 1800 && tries < nTree * 6) {
         tries++;
         const x = minX + rnd() * (maxX - minX), z = minZ + rnd() * (maxZ - minZ);
-        if (!insideRing(p.ring, x, z)) continue;
+        if (!inBox(x, z) || !insideRing(clipped, x, z)) continue;
         trees.push({ x, z, s: 0.7 + rnd() * 1.0 });
         placed++;
       }
@@ -864,13 +932,13 @@ export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolyg
       while (placed < nBush && bushes.length < 1000 && tries < nBush * 6) {
         tries++;
         const x = minX + rnd() * (maxX - minX), z = minZ + rnd() * (maxZ - minZ);
-        if (!insideRing(p.ring, x, z)) continue;
+        if (!inBox(x, z) || !insideRing(clipped, x, z)) continue;
         bushes.push({ x, z, s: 0.5 + rnd() * 0.75 });
         placed++;
       }
     }
     return { trees, bushes };
-  }, [polygons]);
+  }, [polygons, area]);
 
   useLayoutEffect(() => {
     const c = crown.current, t = trunk.current, b = bush.current;

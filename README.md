@@ -1,131 +1,134 @@
-# SimCity Kraków
+# Krakopolis
 
-**3D symulacja Krakowa napędzana prawdziwymi publicznymi danymi miejskimi,
-z symulowanymi konsekwencjami decyzji gracza.**
+> Polska: **3D sandbox analizy i planowania miasta dla Krakowa** — prawdziwe dane OSM + ZTP, jawne rozróżnienie OBSERVED / SIMULATED.
 
-Drogi, budynki, przystanki i trasy komunikacji pochodzą z OpenStreetMap i z
-oficjalnego GTFS Zarządu Transportu Publicznego w Krakowie. Realne pojazdy MPK
-są czytane z GTFS-RT (pozycje GPS co 15–30 s) i renderowane w miejscu, w którym
-naprawdę się znajdują. Gracz zamienia ulice, strefy piesze i przystanki — a
-symulacja liczy, jak zmienia się rozkład ruchu na prawdziwej sieci drogowej.
+**3D city analysis / planning sandbox for Kraków**
 
-## Uruchomienie
+[Live demo](https://krakopolis.pages.dev/) · Hackathon-style OSS city lab
+
+---
+
+## Problem / solution
+
+Cities publish a lot of open data — roads, buildings, transit — but decision-makers and citizens rarely get an interactive place to *try* changes and see consequences without confusing models with measurements.
+
+**Krakopolis** loads a real Kraków downtown footprint (OSM + ZTP Kraków GTFS/GTFS-RT), lets you place or remove player-built structures, run analysis layers and disaster scenarios, and keeps source truth separate from simulation. What came from a public feed stays labeled; what the game invents is labeled too.
+
+## Features
+
+- **Build** — catalog placement with preview → confirm (budget in PLN, undo/redo)
+- **Analysis layers** — traffic colour modes, map layers, labels (Analyze mode)
+- **Disasters / events** — scenario preview then confirm
+- **History** — city versions persisted in **IndexedDB** (survives refresh)
+- **Live + cached data** — OSM geography, ZTP GTFS schedules, GTFS-RT vehicles when online
+- **Minimap** — OSM raster tiles with attribution
+- **Search** — streets, stops, POIs from ingested OSM/GTFS
+- **Controls** — keyboard-first city builder UX (see cheat sheet)
+
+## OBSERVED vs SIMULATED (honesty)
+
+Every meaningful number and entity carries an origin:
+
+| Tag | Meaning |
+|---|---|
+| **OBSERVED** | Straight from a public source (e.g. GTFS-RT GPS of an MPK vehicle) |
+| **PREDICTED** | Derived from observations (e.g. reassignment after closing a road) |
+| **SIMULATED** | Invented by the game (agent cars/pedestrians, some metric estimates) |
+
+Baseline city data is never overwritten by the player. Simulation reads `baseline` and writes a separate future state. Live vehicles render with a green ring when they are **OBSERVED**.
+
+Analysis results and disaster outcomes are **SIMULATED / model estimates** — not marketed as “AI predictions.”
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| App | Vite + React + TypeScript |
+| 3D | React Three Fiber, Three.js, Drei |
+| Deploy | Cloudflare Pages (+ Pages Functions proxy for ZTP) |
+| Data pipeline | `tsx` ingest scripts → `public/data/*.json` |
+| Client history | IndexedDB |
+
+## Screenshots
+
+> Placeholder — add stills from the live demo.
+
+| Scene | HUD / modes |
+|---|---|
+| ![scene](docs/screenshots/scene.png) | ![hud](docs/screenshots/hud.png) |
+
+*(Create `docs/screenshots/` and drop PNGs when ready.)*
+
+## Quick start
+
+Requires Node.js 20+ and network for the first ingest (or use already baked `public/data`).
 
 ```bash
-npm install
-npm run ingest      # pobiera prawdziwe dane do public/data (jednorazowo, ~10–20 min)
+npm ci
+npm run ingest      # optional if public/data is already present; ~10–20 min, needs network
+npm run basemap     # optional satellite mosaic (Esri tiles → public/data/basemap.jpg)
 npm run dev         # http://localhost:5173
 ```
 
-`npm run ingest` potrzebuje sieci. Bez niego aplikacja nie ma czego pokazać —
-nie ma w repo żadnych wymyślonych danych zapasowych, które udawałyby prawdziwe.
-
 ```bash
-npm run sim:test    # smoke test silnika na prawdziwych danych
-npm run build       # kontrola typów + build produkcyjny
-npm run preview     # podgląd builda (proxy danych działa też tutaj)
+npm run build       # typecheck + production build
+npm run preview     # local preview (Vite proxy for live feeds)
+npm run deploy      # build + wrangler pages deploy → project krakopolis
+npm run sim:test    # smoke-test simulation on baked data
 ```
 
-## Skąd biorą się dane
+CORS: ZTP and Overpass do not send browser CORS headers. Dev/preview use Vite proxy; production uses Cloudflare Pages Functions under `/api/live/ztp/*`.
 
-Pełny opis źródeł, formatów i tego, **czego publicznie nie ma**, jest w
-[`DATA_SOURCES.md`](./DATA_SOURCES.md). W skrócie:
+## Controls cheat sheet
 
-| Warstwa | Źródło | Status |
+| Input | Action |
+|---|---|
+| LMB drag | Orbit |
+| Wheel | Zoom |
+| RMB / middle | Pan |
+| Shift + RMB | Tilt |
+| WASD / arrows | Pan |
+| Q / E | Rotate view |
+| R | Rotate building ghost |
+| Esc | Cancel pending |
+| Z / Y | Undo / redo |
+| Delete / Backspace | Demolish **player** building |
+| Space | Pause |
+| N | Fit whole city |
+| 1–4 | Build / Analyze / Events / History |
+| View dock (bottom-right) | Toggle Search · Metrics · Panels · Minimap · Footer · Modes |
+
+OSM buildings cannot be demolished — only player-built volumes. Confirm dialogs apply to build preview and disaster preview.
+
+## Data sources & licenses
+
+Full detail: [`DATA_SOURCES.md`](./DATA_SOURCES.md).
+
+| Layer | Source | License / note |
 |---|---|---|
-| Drogi, budynki, zieleń, woda, światła | OpenStreetMap / Overpass API | `CACHED` |
-| Linie, przystanki, trasy, kształty | ZTP Kraków, GTFS (T/A/M) | `CACHED` |
-| **Realne pojazdy MPK** | ZTP Kraków, GTFS-RT `VehiclePositions` | **`LIVE`** |
-| Ruch drogowy (poziom zastoju) | ZTP Kraków, `congestion_level` z GTFS-RT | **`LIVE`** |
-| Pogoda | Open-Meteo | **`LIVE`** |
-| Jakość powietrza | Open-Meteo Air Quality (model CAMS) | `PREDICTED` |
+| Roads, buildings, greenery, water | OpenStreetMap / Overpass | **ODbL 1.0** |
+| Routes, stops, shapes | ZTP Kraków GTFS | Public feed; ZTP terms |
+| Live vehicles / congestion hints | ZTP Kraków GTFS-RT | Public feed; ZTP terms |
+| Weather / air quality | Open-Meteo | **CC BY 4.0** |
+| Satellite basemap (optional) | Esri World Imagery | © Esri, Maxar, Earthstar Geographics |
+| Minimap tiles | OSM raster | © OpenStreetMap contributors |
 
-Kraków **nie publikuje** otwartego API z natężeniem ruchu drogowego ani liczbą
-pieszych. Zamiast zmyślać te liczby, używamy tego, co jest: `congestion_level`
-z GTFS-RTPoziom zastoju raportowany przez ZTP dla każdego pojazdu. Reszta jest
-jawnie oznaczona jako `PREDICTED`.
+Application code is intended to be **MIT** (add a `LICENSE` file if you fork/publish formally). Respect upstream data licenses when redistributing tiles or extracts.
 
-## Trzy kategorie danych — nigdy nie mieszane
-
-Każda liczba w interfejsie ma przypisane pochodzenie:
-
-* **OBSERVED** — wprost z publicznego źródła. Przykład: pozycja GPS tramwaju
-  linii 18 z `VehiclePositions_T.pb`, poziom zastoju `congestion_level = 3`.
-* **PREDICTED** — policzone z danych zaobserwowanych. Przykład: po zamknięciu
-  ulicy przypisanie ruchu daje na obwodnicy 92 % zamiast 80 %; prędkość
-  z dwóch kolejnych pozycji tego samego pojazdu.
-* **SIMULATED** — wygenerowane przez grę. Przykład: 130 poruszających się aut,
-  sylwetki pieszych, poziom smogu w metrykach.
-
-Przycisk **Kolor: dane / predykcja / symulacja** pod sceną przełącza, co dokładnie
-widoczne na jezdniach. Panel po prawej pokazuje dla wybranego odcinka dwie liczby
-niezależnie: `DANE ŹRÓDŁOWE` (nieruszone przez grę) i `PREDYKCJA SYMULACJI`.
-
-## Jak to jest zbudowane
+## Project structure
 
 ```
-scripts/ingest.ts          pobiera prawdziwe dane → public/data/*.json
-src/data/
-  config.ts                adresy źródeł, interwały odświeżania
-  geo.ts                   obszar i lokalna projekcja metry (0,0 = Rynek Główny)
-  types.ts                 CityState / RoadState / VehicleState + pochodzenie danych
-  baked.ts                 format plików offline
-  sources/
-    mpk/gtfsrt.ts          dekoder protobuf dla GTFS-RT (bez zależności)
-    mpk/live.ts            live: pozycje pojazdów; fallback: migawka
-    environment/live.ts    Open-Meteo: pogoda i jakość powietrza
-  adapters/cityAdapter.ts  surowe dane → wewnętrzny CityData
-  cache/store.ts           cache przeglądarki, liczenie wieku danych
-  pipeline.ts              cykl: pobierz → zwaliduj → znormalizuj → podmień
-src/simulation/
-  graph.ts                 graf z OSM, Dijkstra, czas przejazdu (BPR)
-  traffic/assignment.ts    predykcja rozkładu ruchu (przyrostowe przypisanie)
-  pedestrians/agents.ts    agenci symulacji
-  sim.ts                   baseline + playerChanges → simulatedFutureState
-src/scene/                 R3F: teren, drogi, budynki, pojazdy, piesi
-src/ui/                    HUD + panel źródeł danych
+functions/               Cloudflare Pages Functions (ZTP proxy, health)
+public/data/             Baked OSM / GTFS / terrain / basemap
+scripts/ingest.ts        Fetch & normalize city data
+scripts/basemap.ts       Optional satellite mosaic
+src/data/                Sources, adapters, cache, pipeline
+src/simulation/          Graph, traffic assignment, city sim
+src/scene/               R3F city scene, layers, models
+src/ui/                  HUD, minimap, styles
+wrangler.toml            Pages project name: krakopolis
 ```
 
-**Silnik symulacji nie wykonuje zapytań sieciowych.** Dostaje gotowy `CityData`
-i nakłada na niego decyzje gracza. Dane źródłowe nigdy nie są nadpisywane przez
-gracza — `baseline` i `predicted` to osobne pola.
+## License
 
-## Realistyczne modele
-
-Tramwaj (21,4 m): dwie bryły nadwozia z zaokrąglonymi krawędziami, pas okien,
-listwa, dach, pantograf, dwa bogie, tablica z numerem linii (tekstura Canvas).
-Autobus (12 m): nadwozie, zabudowa dachu, szyby, koła, tablica linii.
-Piesi: sylwetka z głową, tułowiem, dwiema nogami i dwiema ramionami
-z animowanym krokiem oraz wahaniem wysokości; sylwetki mają indywidualny wzrost
-i kolor skóry, ubrania i wariant.
-
-W scenie widać też **zielone pierścienie** pod realnymi pojazdami z GTFS-RT —
-to jednoznaczny znak, że dana bryła to obserwacja, a nie agent gry.
-
-## Demo (HackYeah)
-
-1. Otwiera się 3D mapa Krakowa z realnymi ulicami, budynkami i przystankami.
-2. Panel danych pokazuje, co jest `LIVE`, a co `CACHED`, z czasem odczytu.
-3. Zielone pierścienie pod tramwajami i autobusami oznaczają realne pojazdy.
-4. Gracz klika prawdziwą ulicę — panel pokazuje `OBSERVED` z danych źródłowych.
-5. „Zamknij ulicę” → barierki w 3D, natychmiastowa predykcja objazdów.
-6. Przełączenie „Kolor: dane / predykcja” pokazuje różnicę.
-7. Metryki miasta (ruch, smog, hałas, zadowolenie) reagują na zmiany.
-
-## Uwagi techniczne
-
-* **CORS.** `gtfs.ztp.krakow.pl` i Overpass nie wysyłają nagłówków CORS, więc
-  `vite.config.ts` robi przezroczyste proxy do tych samych, publicznych adresów
-  (działa w `dev` i `preview`).
-* **Wydajność.** Drogi, budynki, pojazdy i piesi są instancjonowane; przypisanie
-  ruchu jest przyrostowe (kilka źródeł Dijkstry na krok), więc nie blokuje klatki.
-* **Odświeżanie.** GTFS-RT co 15 s, pogoda co 10 min. Interwały da się nadpisać
-  w URL: `?refresh=vehicles:10&refresh=traffic:20`.
-* **Fallback.** Gdy API nie odpowiada, aplikacja pokazuje ostatni prawdziwy
-  odczyt oznaczony `CACHED` z czasem, kiedy go zapisano. Nigdy nie podstawia
-  wartości losowych.
-
-## Licencje danych
-
-OpenStreetMap — ODbL 1.0. Dane ZTP Kraków — zastrzeżone, dostępne publicznie na
-`gtfs.ztp.krakow.pl`. Open-Meteo — CC BY 4.0. Kod aplikacji — MIT.
+No `LICENSE` file in this tree yet. Treat application source as **MIT** unless stated otherwise; data remains under its own licenses above.

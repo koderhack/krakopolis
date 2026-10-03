@@ -118,7 +118,7 @@ export function buildCityData(b: BakedBundle): CityData {
       name: x.name, landmark: x.landmark, ring: fit.ring, levels: x.levels,
     });
   }
-  const polygons: SimPolygon[] = b.city.polygons.map((p) => ({ ring: p.ring, kind: p.kind }));
+  const polygons: SimPolygon[] = b.city.polygons.map((p) => ({ ring: p.ring, kind: p.kind, name: p.name }));
   const osmCount = buildings.length;
   const infill = generateInfill(buildings, b.city.nodes, network.roads, polygons, 420);
   buildings.push(...infill);

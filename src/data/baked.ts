@@ -54,6 +54,8 @@ export interface BakedPolygon {
   /** Pierścień [x,z][] – bez domknięcia. */
   ring: [number, number][];
   kind: 'water' | 'green';
+  /** Nazwa z OSM (park, skwer, zbiornik) – pod wyszukiwarkę. */
+  name?: string;
 }
 
 export interface BakedCity {

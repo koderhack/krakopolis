@@ -1290,7 +1290,7 @@ export class Sim {
       this.reroute();
     };
     apply();
-    this.history.push({ label: `usunięto: ${b.name}`, at: Date.now(), apply, revert });
+    this.history.push({ label: `zburzono: ${b.name}`, at: Date.now(), apply, revert });
     return null;
   }
 

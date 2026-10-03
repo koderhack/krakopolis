@@ -66,6 +66,8 @@ export interface SimPoi {
 export interface SimPolygon {
   ring: [number, number][];
   kind: 'water' | 'green';
+  /** Nazwa z OSM (np. Planty, Park Jordana). */
+  name?: string;
 }
 
 export interface CityData {

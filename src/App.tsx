@@ -51,7 +51,7 @@ export default function App() {
   if (!city || !pipe) {
     return (
       <div className="boot">
-        <h1>SimCity Kraków</h1>
+        <h1>Krakopolis</h1>
         <p>Wczytuję dane: OpenStreetMap, GTFS i GTFS-RT ZTP Kraków…</p>
       </div>
     );
@@ -469,12 +469,23 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         });
         return;
       }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && sel?.kind === 'player') {
-        e.preventDefault();
-        const id = sel.id;
-        act(() => sim.removePlayerBuilding(id), 'Usunięto budynek.');
-        setSel(null);
-        return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (sel?.kind === 'player') {
+          e.preventDefault();
+          const id = sel.id;
+          const name = sim.playerBuildings.find((b) => b.id === id)?.name ?? 'budynek';
+          act(() => sim.removePlayerBuilding(id), `Zburzono: ${name}.`);
+          setSel(null);
+          return;
+        }
+        if (sel?.kind === 'building') {
+          e.preventDefault();
+          setMsg((m) => ({
+            id: m.id + 1,
+            text: 'Budynków OSM nie można zburzyć — tylko budynki gracza.',
+          }));
+          return;
+        }
       }
       if (k === 'n') {
         e.preventDefault();
@@ -583,9 +594,13 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
           if (t !== 'build') setBuildId(null);
           setPending(null);
           setPendingDisaster(null);
-          if (t === 'build') setMode('build');
-          else if (t === 'disaster') setMode('events');
-          else setMode(null);
+          if (t === 'build' || t === 'park' || t === 'park-rect' || t === 'stop-bus' || t === 'stop-tram' || t === 'road' || t === 'tram-track') {
+            setMode('build');
+          } else if (t === 'disaster') {
+            setMode('events');
+          } else {
+            setMode(null);
+          }
         }}
         topDown={topDown}
         setTopDown={setTopDown}
@@ -593,6 +608,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         setSpeed={setSpeed}
         setTrafficView={setTrafficView}
         setVehicle={setVehicle}
+        setSel={setSel}
         disaster={disaster}
         setDisaster={setDisaster}
         roadFrom={roadFrom}

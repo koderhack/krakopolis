@@ -553,7 +553,7 @@ function buildCity(osm: OsmElement[]): BakedCity {
       const ring = toRing(el);
       if (ring.length >= 3 && !seenP.has(el.id)) {
         seenP.add(el.id);
-        polygons.push({ ring, kind: 'water' });
+        polygons.push({ ring, kind: 'water', name: tags.name?.trim() || undefined });
       }
     }
     if (el.type !== 'way' || !el.tags) continue;
@@ -570,7 +570,8 @@ function buildCity(osm: OsmElement[]): BakedCity {
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (const p of ring) { minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]); minZ = Math.min(minZ, p[1]); maxZ = Math.max(maxZ, p[1]); }
     if (maxX - minX > 900 && maxZ - minZ > 900) continue;
-    polygons.push({ ring, kind: water ? 'water' : 'green' });
+    const polyName = el.tags.name?.trim() || undefined;
+    polygons.push({ ring, kind: water ? 'water' : 'green', name: polyName });
   }
 
   const signals: [number, number][] = [];
@@ -588,19 +589,35 @@ function buildCity(osm: OsmElement[]): BakedCity {
     place_of_worship: 'Kościół', police: 'Policja', fire_station: 'Straż pożarna',
     theatre: 'Teatr', courthouse: 'Sąd', attraction: 'Atrakcja', station: 'Dworzec',
     memorial: 'Pomnik', monument: 'Pomnik', castle: 'Zamek',
+    museum: 'Muzeum', artwork: 'Rzeźba', viewpoint: 'Punkt widokowy',
+    park: 'Park', garden: 'Ogród',
   };
+  const poiKey = (tags: Record<string, string>) =>
+    tags.amenity ?? tags.tourism ?? tags.railway ?? tags.historic ?? tags.leisure;
   for (const el of osm) {
-    if (el.type !== 'node' || seenPoi.has(el.id) || !el.tags) continue;
+    if (seenPoi.has(el.id) || !el.tags) continue;
     const tags = el.tags;
     if (!tags.name) continue;
-    const key = tags.amenity ?? tags.tourism ?? tags.railway ?? tags.historic;
+    const key = poiKey(tags);
     if (!key) continue;
     const category = CATEGORY[key];
     if (!category) continue;
-    const p = coord.get(el.id);
-    if (!p) continue;
+    let p = el.type === 'node' ? coord.get(el.id) : undefined;
+    if (!p && el.lat !== undefined && el.lon !== undefined) {
+      const loc = toLocal(el.lat, el.lon);
+      p = [round(loc.x), round(loc.z)];
+    }
+    if (!p && el.type === 'way' && el.nodes?.length) {
+      let sx = 0, sz = 0, n = 0;
+      for (const nid of el.nodes) {
+        const c = coord.get(nid);
+        if (c) { sx += c[0]; sz += c[1]; n++; }
+      }
+      if (n) p = [round(sx / n), round(sz / n)];
+    }
+    if (!p || !inLocalArea(p[0], p[1])) continue;
     seenPoi.add(el.id);
-    pois.push({ name: tags.name, category, x: round(p[0]), z: round(p[1]) });
+    pois.push({ name: tags.name, category, x: p[0], z: p[1] });
   }
 
   return { generatedAt: nowIso(), area, nodes, roads: keptRoads, buildings, polygons, signals, pois };
