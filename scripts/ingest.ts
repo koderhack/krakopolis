@@ -120,6 +120,7 @@ function overpassQuery(b: { minLat: number; maxLat: number; minLon: number; maxL
   node["highway"="traffic_signals"](${bb});
 );
 out geom;`;
+}
 
 /** Osobne zapytanie o miejsca (POI) – małe, więc Overpass odpowiada szybko. */
 function poiQuery(b: { minLat: number; maxLat: number; minLon: number; maxLon: number }): string {
@@ -1243,4 +1244,3 @@ function edgeBetweenNodes(city: BakedCity, a: number, b: number): number | undef
 
 
 main().catch((e) => { console.error('ingest nieudany:', e); process.exit(1); });
-}
