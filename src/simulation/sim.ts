@@ -1,91 +1,324 @@
-import type { CityData } from '../data/cityData';
+/**
+ * Silnik symulacji. Nie wykonuje żadnych zapytań sieciowych.
+ *
+ *   baselineState  – prawdziwe dane (OSM + ZTP + pogoda), wstrzykiwane z CityData,
+ *   playerChanges  – decyzje gracza,
+ *   simulatedFuture– to, co widzimy w symulacji (PREDICTED + SIMULATED).
+ *
+ * Stan z danych źródłowych nigdy nie jest nadpisywany przez gracza – trzymamy
+ * obie warstwy osobno i pokazujemy je osobno w UI.
+ */
+import { buildGraph, edgeCosts, travelTime, MinHeap, TreeCache, type GraphEdge, type RoadGraph } from './graph';
+import { TrafficAssignment, mulberry32 } from './traffic/assignment';
+import { CAR, BUS, TRAM, PedestrianPool, makeRnd, type Park, type Ped, type Veh, type VehKind } from './pedestrians/agents';
+import type { CityData, SimRoute } from '../data/model';
+import {
+  DISASTERS, DISASTER_EFFECTS, PlayerHistory, disasterPenalty, pickRoads,
+  type DisasterKind, type DisasterState, type NewStop, type PlayerBuilding, type PlayerChange, type RoadClosure,
+} from './city/player';
+import type { Origin } from '../data/types';
 
-export interface Edge {
-  id: number; name: string; a: number; b: number; ax: number; az: number; bx: number; bz: number;
-  hx: number; hz: number; len: number; speedLimit: number; capacity: number; load: number; trafficLevel: number;
-  closed: boolean; pedestrian: boolean; hasStop: boolean; pw: number;
+export const MAX_PEDS = 900;
+/**
+ * Ile realnych pojazdów reprezentuje jeden agent symulacji.
+ * Sieć w modelu ma ~41 km dróg zjazdowych, a Kraków w szczycie ruchu ma tam
+ * dziesiątki tysięcy pojazdów – tyle agentów nie da się ani policzyć, ani
+ * wyrenderować. Agent jest więc „paczką" ruchu: jeden agent = VEH_PER_AGENT
+ * pojazdów. Metryki i predykcja operują na liczbie pojazdów, scena pokazuje
+ * agentów; obie liczby są widoczne w HUD.
+ */
+export const VEH_PER_AGENT = 9;
+export const TICK = 0.1;
+export const COST = {
+  close: 20,
+  carsOnly: 30,
+  pedestrian: 150,
+  stop: 80,
+  stopTram: 110,
+  park: 120,
+  mall: 420,
+  university: 380,
+  road: 260,
+};
+
+export interface RoadSim {
+  edge: GraphEdge;
+  /** Stan zamknięcia wprowadzony przez gracza lub katastrofę. */
+  closure: RoadClosure;
+  /** Odcinek zniszczony – nieprzejezdny dla wszystkich, do odbudowy lub cofnięcia. */
+  destroyed: boolean;
+  /** Poziom ruchu z danych źródłowych. 0..1. Nigdy nie zmieniany przez gracza. */
+  baseline: number;
+  baselineOrigin: Origin;
+  baselineSpeed?: number;
+  /** Poziom ruchu wyliczony przez przypisanie ruchu po zmianach gracza. 0..1. */
+  predicted: number;
+  /** Bieżący, animowany poziom ruchu (SIMULATED). */
+  level: number;
+  /** Obliczona przepustowość – stała, z klasy drogi i liczby pasów. */
+  capacity: number;
+  closed: boolean;
+  pedestrian: boolean;
+  /** Zmiana gracza: nowy przystanek. */
+  addedStop: boolean;
+  /** Realny przystanek MPK na tym odcinku. */
+  realStop: boolean;
+  /** Czy tu kursuje prawdziwa komunikacja (z mapowania GTFS). */
+  transit: boolean;
+  /** Odcinek dodany przez gracza – nowa droga lub autostrada. */
+  built: boolean;
+  /** Liczba pojazdów na odcinku (agenci × VEH_PER_AGENT). */
+  vehicles: number;
+  /** Waga przyciągania pieszych (wyższa na deptaku i przy przystankach). */
+  walkWeight: number;
 }
-export interface Veh { kind: 0 | 1 | 2; ref: string; route: number[]; si: number; edge: number; dir: 1 | -1; s: number; speed: number; dest: number; nodes: number[]; dwell: number; x: number; z: number; yaw: number }
-export interface Ped { edge: number; dir: 1 | -1; s: number; speed: number; side: 1 | -1; jit: number; x: number; z: number }
-export interface Park { x: number; z: number; r: number }
-export interface Stop { edge: number; name: string }
-export interface Metrics { traffic: number; transit: number; pedestrians: number; pollution: number; noise: number; satisfaction: number; budget: number }
 
-export const MAX_PEDS = 420;
-export const N_CARS = 150;
-export const TICK = 0.1; // stały krok symulacji [s]
-export const COST = { close: 20, pedestrian: 150, stop: 80, park: 120 };
-const clamp = (v: number, a = 0, b = 100) => Math.max(a, Math.min(b, v));
-
-export function distToRoads(edges: Edge[], x: number, z: number) {
-  let best = Infinity;
-  for (const e of edges) {
-    const t = clamp((x - e.ax) * e.hx + (z - e.az) * e.hz, 0, e.len);
-    best = Math.min(best, Math.hypot(x - (e.ax + e.hx * t), z - (e.az + e.hz * t)));
-  }
-  return best;
+export interface Metrics {
+  traffic: number;
+  transit: number;
+  pedestrians: number;
+  pollution: number;
+  noise: number;
+  satisfaction: number;
+  budget: number;
 }
 
-/** Silnik symulacji niezależny od renderowania i Reacta. Kolejność kroku: pojazdy, obciążenie dróg, komunikacja, piesi, metryki. */
+export interface Snapshot extends Metrics {
+  cars: number;
+  /** Liczba pojazdów reprezentowanych przez agentów (agent × VEH_PER_AGENT). */
+  vehiclesModelled: number;
+  peds: number;
+  trams: number;
+  buses: number;
+  realVehicles: number;
+  realTrams: number;
+  realBuses: number;
+  time: number;
+  /** Ile odcinków ma zamknięcie od gracza. */
+  closed: number;
+  assignmentAt: string;
+  assignmentIterations: number;
+  /** Liczba budynków dodanych przez gracza. */
+  built: number;
+  /** Liczba przystanków dodanych przez gracza. */
+  newStops: number;
+  destroyed: number;
+  disasters: number;
+  undoDepth: number;
+}
+
+/** Liczba aut: ~18 na kilometr sieci zjazdowej, z sensownymi ograniczeniami. */
+/** Minimalny odstęp między pojazdami [m] – długość pojazdu plus margines. */
+export const minGap = (kind: number) => (kind === TRAM ? 26 : kind === BUS ? 14 : 7.5);
+
+const cmpVeh = (a: Veh, b: Veh) => (a.dir - b.dir) || (a.s - b.s);
+
+function carCountFor(g: RoadGraph): number {
+  let km = 0;
+  for (const e of g.edges) if (e.carAccess) km += e.len / 1000;
+  return Math.max(200, Math.min(1100, Math.round(km * 18)));
+}
+
 export class Sim {
-  edges: Edge[] = [];
-  adj: { e: number; to: number }[][] = [];
-  eid = new Map<number, number>();
+  g: RoadGraph;
+  roads: RoadSim[] = [];
   veh: Veh[] = [];
   peds: Ped[] = [];
   parks: Park[] = [];
-  stops: Stop[] = [];
-  activePeds = 140;
   time = 0;
   version = 0;
   m: Metrics = { traffic: 0, transit: 0, pedestrians: 0, pollution: 0, noise: 0, satisfaction: 60, budget: 1000 };
+
+  private city: CityData | null = null;
+  private routes: SimRoute[] = [];
+  /** Przystanki: prawdziwe (z GTFS) + dodane przez gracza. */
+  stops: { roadId: number; name: string; lines: string[] }[] = [];
+  private peds_!: PedestrianPool;
+  private rnd = makeRnd(20261003);
   private acc = 0;
   private tickN = 0;
-  private seed = 20261003;
+  private assignment: TrafficAssignment | null = null;
+  private assignAt = 0;
+  private assignTimer = 0;
+  private assignIterations = 0;
+  private scratch = { dist: new Float64Array(0), prev: new Float64Array(0), prevEdge: new Float32Array(0), done: new Uint8Array(0), heap: new MinHeap() };
+  /** Drzewa tras: jeden przebieg Dijkstry obsługuje wszystkie auta na danym skrzyżowaniu. */
+  private trees = new TreeCache(96, 40_000);
+  /**
+   * Węzły „huby", na które kierują się pojazdy. Trasa jest wyznaczana od
+   * docelowego huba, więc wystarczy kilkadziesiąt drzew Dijkstry zamiast
+   * jednego na każde skrzyżowanie, na które wjeżdża auto.
+   */
+  private hubs: number[] = [];
+  /** Aktualne obciążenie dróg – waga w drzewach tras. */
+  private roadLoad = new Float32Array(0);
+  /** Koszty przejazdu przeliczone raz na krok (bez Math.pow w pętli Dijkstry). */
+  private costs = new Float32Array(0) as Float32Array;
+  /**
+   * Węzły, do których da się dojechać z głównej składowej sieci zjazdowej.
+   * Wyznaczone raz, przy budowie – dzięki temu auta nie próbują w kółko
+   * tras do nieosiągalnych celów (co zjadało klatkę).
+   */
+  private carTargets: number[] = [];
+  private carNodes: number[] = [];
+  private transitVehPerRoute = new Map<number, number>();
+  /** Trasa bieżącego pojazdu MPK – używana przez routeTail(). */
+  private vehRoute: number[] = [];
+  /** Prawdziwe pojazdy z ostatniego odczytu GTFS-RT (OBSERVED). */
+  realVehicles: CityData['liveVehicles'] = [];
+  /** Mnożnik prędkości od aktywnych katastrof (0..1). */
+  private disasterSpeed = 1;
+  private disasterMood = { speed: 1, satisfaction: 0, pollution: 0, noise: 0 };
+  private costByRoad = new Map<number, number>();
+  /** Budynki postawione przez gracza – SIMULATED. */
+  playerBuildings: PlayerBuilding[] = [];
+  /** Przystanki dodane przez gracza (osobno autobusowe i tramwajowe). */
+  playerStops: NewStop[] = [];
+  /** Aktywne katastrofy – SIMULATED. */
+  disasters: DisasterState[] = [];
+  /** Historia odwracalnych decyzji gracza. */
+  history = new PlayerHistory();
+  /** Liczba zniszczonych odcinków (dla HUD). */
+  destroyedCount = 0;
+  environment = { temperatureC: undefined as number | undefined, pm25: undefined as number | undefined, windKmh: undefined as number | undefined };
+  /** Ostatnia znana temperatura – wpływa na komfort pieszych i spowolnienie ruchu. */
+  private temp = 14;
+  private airFactor = 1;
 
-  constructor(public data: CityData) {
-    const N = data.nodes;
-    this.adj = N.map(() => []);
-    for (const d of data.edges) {
-      const A = N[d.a], B = N[d.b];
-      const len = Math.hypot(B.x - A.x, B.z - A.z);
-      this.edges.push({ id: d.id, name: d.name, a: d.a, b: d.b, ax: A.x, az: A.z, bx: B.x, bz: B.z, hx: (B.x - A.x) / len, hz: (B.z - A.z) / len, len, speedLimit: d.speedLimit, capacity: Math.max(3, Math.round(len / 14)), load: 0, trafficLevel: 0, closed: false, pedestrian: d.pedestrian, hasStop: false, pw: 1 });
-      this.adj[d.a].push({ e: d.id, to: d.b });
-      this.adj[d.b].push({ e: d.id, to: d.a });
-      this.eid.set(d.a * 64 + d.b, d.id);
-      this.eid.set(d.b * 64 + d.a, d.id);
-    }
-    for (const s of data.stops) { this.edges[s.edge].hasStop = true; this.stops.push({ ...s }); }
-    this.reweight();
-    for (let i = 0; i < N_CARS; i++) { const v = this.newVeh(0, '', []); this.respawn(v); this.veh.push(v); }
-    for (const r of data.routes) {
-      for (let i = 0; i < r.count; i++) {
-        const v = this.newVeh(r.kind === 'tram' ? 2 : 1, r.ref, r.nodes);
-        const idx = (i * Math.floor(r.nodes.length / r.count)) % r.nodes.length;
-        v.si = (idx + 1) % r.nodes.length;
-        this.arrive(v, r.nodes[idx], 0);
-        this.veh.push(v);
-      }
-    }
-    for (let i = 0; i < MAX_PEDS; i++) {
-      const p: Ped = { edge: 0, dir: 1, s: 0, speed: 1.1 + this.rnd() * 0.5, side: this.rnd() < 0.5 ? 1 : -1, jit: this.rnd() * 2 - 1, x: 0, z: 0 };
-      this.placePed(p, this.pickPedEdge());
-      this.peds.push(p);
-    }
-    for (let i = 0; i < 100; i++) this.step(TICK);
+  constructor(city: CityData) {
+    this.g = buildGraph(city.nodes, city.roads);
+    this.scratch = { dist: new Float64Array(city.nodes.length), prev: new Float64Array(city.nodes.length), prevEdge: new Float32Array(city.nodes.length), done: new Uint8Array(city.nodes.length), heap: new MinHeap() };
+    this.applyCityData(city);
+    // Gęstość pojazdów dopasowana do realnej długości sieci drogowej w modelu.
+    this.carTarget = carCountFor(this.g);
+    this.buildCarNetwork();
+    this.assignment = new TrafficAssignment(this.g, () => this.blockedPredicate(), this.carTargets);
+    this.assignment.setTarget(this.carTarget * VEH_PER_AGENT);
+    this.runAssignment();
+    for (let i = 0; i < this.carTarget; i++) this.spawnCar();
+    for (let i = 0; i < MAX_PEDS; i++) this.peds_.step(this.peds[i], 0);
     this.metrics();
     this.time = 0;
   }
 
-  private rnd() { // mulberry32: powtarzalna symulacja
-    let t = (this.seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  /**
+   * Węzły sieci zjazdowej oraz lista celów osiągalnych. Wybieramy NAJWIĘKSZĄ
+   * spójną składową – w Starym Mieście część ulic jest zamknięta dla aut (Rynek,
+   * Planty), więc sieć składa się z kilkudziesięciu kawałków. Pojazdy i predykcja
+   * ruchu działają w tym największym, a nie w losowym.
+   */
+  private buildCarNetwork() {
+    const carNodes: number[] = [];
+    const inCar = new Uint8Array(this.g.nodes.length);
+    for (const e of this.g.edges) {
+      if (!e.carAccess || e.capacity <= 0) continue;
+      if (!inCar[e.a]) { inCar[e.a] = 1; carNodes.push(e.a); }
+      if (!inCar[e.b]) { inCar[e.b] = 1; carNodes.push(e.b); }
+    }
+    this.carNodes = carNodes;
+    if (!carNodes.length) return;
+
+    const visited = new Uint8Array(this.g.nodes.length);
+    let best: number[] = [];
+    for (const start of carNodes) {
+      if (visited[start]) continue;
+      const comp: number[] = [];
+      const stack = [start];
+      visited[start] = 1;
+      while (stack.length) {
+        const u = stack.pop()!;
+        comp.push(u);
+        for (const { e, to } of this.g.adj[u]) {
+          const ed = this.g.edges[e];
+          if (!ed.carAccess || visited[to]) continue;
+          if (ed.oneway && ed.a !== u) continue; // do góry pod prąd nie wjeżdżamy
+          visited[to] = 1;
+          stack.push(to);
+        }
+      }
+      if (comp.length > best.length) best = comp;
+    }
+    this.carTargets = best;
+
+    // Huby: ruchomu co X węzłów składowej, żeby cele były rozłożone w całym mieście.
+    const step = Math.max(1, Math.floor(best.length / 80));
+    this.hubs = best.filter((_, i) => i % step === 0);
+    if (this.hubs.length < 4) this.hubs = best.slice(0, 24);
   }
-  private newVeh(kind: 0 | 1 | 2, ref: string, route: number[]): Veh {
-    return { kind, ref, route, si: 0, edge: 0, dir: 1, s: 0, speed: 0, dest: -1, nodes: [], dwell: 0, x: 0, z: 0, yaw: 0 };
+
+  /* ------------------------------------------------------------ dane */
+
+  /** Wstrzykuje / aktualizuje prawdziwe dane źródłowe (baseline). */
+  applyCityData(city: CityData) {
+    this.city = city;
+    this.realVehicles = city.liveVehicles;
+    this.routes = city.routes;
+    this.environment = {
+      temperatureC: city.environment.weather?.temperatureC,
+      pm25: city.environment.airQuality?.pm25,
+      windKmh: city.environment.weather?.windSpeedKmh,
+    };
+    this.temp = city.environment.weather?.temperatureC ?? 14;
+    // PM2.5 z modelu CAMS – wpływa na smog w symulacji, oznaczany jako PREDICTED.
+    this.airFactor = city.environment.airQuality?.pm25 !== undefined
+      ? Math.min(2.2, Math.max(0.7, city.environment.airQuality.pm25 / 15))
+      : 1;
+
+    const stopsByRoad = new Map<number, { roadId: number; name: string; lines: string[] }>();
+    for (const s of city.stops) {
+      if (s.roadId === undefined) continue;
+      const cur = stopsByRoad.get(s.roadId);
+      if (cur) cur.lines = [...new Set([...cur.lines, ...s.lines])];
+      else stopsByRoad.set(s.roadId, { roadId: s.roadId, name: s.name, lines: [...s.lines] });
+    }
+    this.stops = [...stopsByRoad.values()];
+
+    // Nowe odcinki (gdyby dane doszły po restarcie) – dobudowa, zachowując decyzje gracza.
+    if (this.roads.length !== city.roads.length) {
+      const prev = new Map(this.roads.map((r) => [r.edge.id, r]));
+      this.roads = city.roads.map((r) => {
+        const old = prev.get(r.id);
+        const rs: RoadSim = {
+          edge: this.g.edges[r.id],
+          closure: old?.closure ?? 'none',
+          destroyed: old?.destroyed ?? false,
+          baseline: r.baselineTraffic,
+          baselineOrigin: r.baselineOrigin,
+          baselineSpeed: r.baselineSpeed,
+          predicted: r.baselineTraffic,
+          level: old?.level ?? r.baselineTraffic,
+          capacity: r.capacity,
+          closed: old?.closed ?? false,
+          pedestrian: old?.pedestrian ?? false,
+          addedStop: old?.addedStop ?? false,
+          realStop: old?.realStop ?? false,
+          transit: r.transit,
+          built: false,
+          vehicles: 0,
+          walkWeight: 1,
+        };
+        return rs;
+      });
+    } else {
+      city.roads.forEach((r, i) => {
+        const rs = this.roads[i];
+        rs.baseline = r.baselineTraffic;
+        rs.baselineOrigin = r.baselineOrigin;
+        rs.baselineSpeed = r.baselineSpeed;
+        rs.transit = r.transit;
+      });
+    }
+    for (const rs of this.roads) rs.realStop = stopsByRoad.has(rs.edge.id);
+
+    this.reweight();
+    if (this.routes.length && this.transitVehPerRoute.size === 0) {
+      this.retargetTransit();
+      this.respawnAllTransit();
+    }
+    this.version++;
   }
+
+  /* ---------------------------------------------------------- symulacja */
 
   advance(dt: number) {
     this.acc = Math.min(this.acc + dt, 0.5);
@@ -95,222 +328,857 @@ export class Sim {
   step(dt: number) {
     this.time += dt;
     this.tickN++;
-    for (const v of this.veh) this.move(v, dt); // 1-2. ruch aut, komunikacja miejska
-    for (const e of this.edges) e.load = 0;
-    for (const v of this.veh) if (v.kind !== 2) this.edges[v.edge].load += v.kind === 1 ? 2 : 1;
-    for (const e of this.edges) e.trafficLevel += (Math.min(1.5, e.load / e.capacity) - e.trafficLevel) * 0.12; // 5. korki
-    for (let i = this.tickN % 12; i < this.veh.length; i += 12) { // okresowe przeliczanie tras pod aktualne korki
-      const v = this.veh[i];
-      if (v.kind === 2 || !v.nodes.length) continue;
-      const e = this.edges[v.edge];
-      const p = this.path(v.dir > 0 ? e.b : e.a, v.dest, v.kind);
-      if (p) v.nodes = p;
+
+    this.enforceSpacing();
+    for (const v of this.veh) this.move(v, dt);
+
+    for (const r of this.roads) r.vehicles = 0;
+    for (const v of this.veh) {
+      if (v.kind !== TRAM) this.roads[v.edge].vehicles += v.kind === BUS ? 2 : VEH_PER_AGENT;
     }
-    for (let i = 0; i < Math.round(this.activePeds); i++) this.movePed(this.peds[i], dt); // 4. piesi
-    if (this.tickN % 10 === 0) this.metrics(); // 6-8. hałas, smog, statystyki
+
+    // Bieżący poziom ruchu: płynne przejście od baseline do predicted.
+    // Obciążenie dróg do funkcji BPR w wyznaczaniu tras.
+    if (this.roadLoad.length !== this.roads.length) {
+      this.roadLoad = new Float32Array(this.roads.length);
+      this.costs = new Float32Array(this.g.edges.length);
+    }
+    for (let i = 0; i < this.roads.length; i++) {
+      const r = this.roads[i];
+      this.roadLoad[i] = r.closed || r.pedestrian ? 0 : Math.min(1.2, r.level) * r.capacity;
+    }
+    this.costs = edgeCosts(this.g, this.roadLoad);
+
+    // Bieżący poziom ruchu: płynne przejście od baseline do predykcji,
+    // z tłem „normalnego" ruchu z danych (gdy brak pomiaru – PREDICTED).
+    for (const r of this.roads) {
+      const base = r.baselineOrigin === 'OBSERVED' ? r.baseline * 0.45 : r.baseline * 0.6;
+      const target = r.closed ? 0 : r.pedestrian ? 0 : Math.min(1, Math.max(base, r.predicted));
+      r.level += (target - r.level) * Math.min(1, dt * 0.8);
+    }
+
+    // Przypisanie ruchu przyrostowe: jedno źródło Dijkstry co 0,3 s, żeby nie
+    // obciążać klatki. Po decyzji gracza przelicza się je w całości (patrz reroute).
+    this.assignTimer += dt;
+    if (this.assignment && this.assignTimer >= 0.3) {
+      this.assignTimer = 0;
+      this.assignment.advance(1);
+      this.applyAssignment();
+      this.assignAt = Date.now();
+      this.assignIterations = this.assignment.result.iterations;
+    }
+
+    const active = Math.round(this.m.pedestrians > 0 ? this.activePeds : this.activePeds);
+    for (let i = 0; i < active; i++) this.peds_.step(this.peds[i], dt);
+
+    if (this.tickN % 10 === 0) this.metrics();
+    if (this.tickN % 120 === 0) this.retargetTransit();
+    // Pojazdy, które wyjechały poza obszar, znikają.
+    if (this.tickN % 30 === 0) this.cullOutsideArea();
+    this.tickDisasters(dt);
   }
 
-  // ---------- trasowanie ----------
-  private cost(e: Edge, kind: number) {
-    if (kind === 2) return e.len / 9; // tramwaje jeżdżą po torach, zamknięcie ulicy ich nie dotyczy
-    if (e.closed || e.pedestrian) return Infinity;
-    return e.len / (e.speedLimit * Math.max(0.12, 1 - 0.88 * Math.pow(Math.min(1, e.trafficLevel), 1.5)));
-  }
-  private path(src: number, dst: number, kind: number): number[] | null {
-    const n = this.data.nodes.length;
-    const dist = new Array<number>(n).fill(Infinity), prev = new Array<number>(n).fill(-1), done = new Array<boolean>(n).fill(false);
-    dist[src] = 0;
-    for (;;) {
-      let u = -1, b = Infinity;
-      for (let i = 0; i < n; i++) if (!done[i] && dist[i] < b) { b = dist[i]; u = i; }
-      if (u < 0 || u === dst) break;
-      done[u] = true;
-      for (const { e, to } of this.adj[u]) {
-        const c = this.cost(this.edges[e], kind);
-        if (c !== Infinity && dist[u] + c < dist[to]) { dist[to] = dist[u] + c; prev[to] = u; }
-      }
+  activePeds = 260;
+  /** Liczba symulowanych aut – wynika z długości realnej sieci drogowej. */
+  carTarget = 600;
+
+  /* ------------------------------------------------------- trasowanie */
+
+  private cost(r: RoadSim, kind: VehKind): number {
+    const e = r.edge;
+    if (kind === TRAM) {
+      // Tramwaje mają własne torowisko – zamknięcie ulicy dla aut ich nie dotyczy,
+      // chyba że odcinek nie jest w ogóle torowy.
+      return e.transit || e.hasTram ? travelTime(e, 0) : Infinity;
     }
-    if (dist[dst] === Infinity) return null;
-    const out: number[] = [];
-    for (let v = dst; v !== src; v = prev[v]) out.push(v);
-    return out.reverse();
+    if (r.closed || r.pedestrian || !e.carAccess) return Infinity;
+    if (e.oneway && r.closed) return Infinity;
+    return travelTime(e, r.level * e.capacity);
   }
-  private blocked(a: number, b: number, kind: number) {
-    return this.cost(this.edges[this.eid.get(a * 64 + b)!], kind) === Infinity;
+
+  /**
+   * Zbiór odcinków niedostępnych dla aut. Budowany raz i ważny do momentu
+   * decyzji gracza – wcześniej powstawał na każde wywołanie Dijkstry
+   * (kosztował 26 ms na tick, czyli połowę czasu klatki).
+   */
+  private blockedCache: { set: Set<number>; at: number } | null = null;
+  private blockedPredicate(): (e: number) => boolean {
+    if (!this.blockedCache) {
+      const set = new Set<number>();
+      for (const r of this.roads) {
+        // Katastrofa zamyka wszystkich, także tramwaje.
+        if (r.destroyed || r.closure === 'closed' || r.pedestrian || !r.edge.carAccess) set.add(r.edge.id);
+      }
+      this.blockedCache = { set, at: this.version };
+    }
+    const { set } = this.blockedCache;
+    return (e: number) => set.has(e);
   }
+
+  private path(src: number, dst: number, kind: VehKind): number[] | null {
+    if (kind === TRAM) {
+      // Tramwaje jadą swoją trasą z GTFS – Dijkstra tylko awaryjnie.
+      return this.g.adj[src].some((o) => o.to === dst) ? [dst] : null;
+    }
+    const blocked = this.blockedPredicate();
+    const tree = this.trees.get(this.g, dst, blocked, this.costs, this.version);
+    const edges = tree.pathToRoot(src);
+    if (!edges || !edges.length) return null;
+    // Drzewo zwraca listę ODCINKÓW w kolejności src → cel; zamieniamy na węzły.
+    const nodes = new Array<number>(edges.length);
+    let cur = src;
+    for (let i = 0; i < edges.length; i++) {
+      const e = this.g.edges[edges[i]];
+      cur = e.a === cur ? e.b : e.a;
+      nodes[i] = cur;
+    }
+    return nodes;
+  }
+
+  private edgeBetween(a: number, b: number): number | undefined {
+    const hit = this.g.adj[a].find((o) => o.to === b);
+    return hit?.e;
+  }
+
   private pickDest(v: Veh, from: number): boolean {
-    if (v.kind === 0) {
-      for (let i = 0; i < 10; i++) {
-        const d = Math.floor(this.rnd() * this.data.nodes.length);
+    if (v.kind === CAR) {
+      // Cele to huby – dzięki temu liczba potrzebnych drzew jest stała.
+      const pool = this.hubs.length ? this.hubs : this.carTargets.length ? this.carTargets : this.carNodes;
+      if (!pool.length) { this.respawn(v); return false; }
+      for (let i = 0; i < 3; i++) {
+        const d = pool[Math.floor(this.rnd() * pool.length)];
         if (d === from) continue;
-        const p = this.path(from, d, 0);
-        if (p) { v.dest = d; v.nodes = p; return true; }
+        const p = this.path(from, d, v.kind);
+        if (p && p.length) { v.dest = d; v.nodes = p; return true; }
       }
       this.respawn(v);
       return false;
     }
-    for (let i = 0; i < v.route.length; i++) {
-      const d = v.route[v.si];
-      v.si = (v.si + 1) % v.route.length;
-      if (d === from) continue;
-      const p = this.path(from, d, v.kind) ?? this.path(from, d, 2);
-      if (p) { v.dest = d; v.nodes = p; return true; }
+    // Tramwaj/autobus wracają do następnego węzła trasy.
+    // Tramwaje i autobusy idą DOKŁADNIE swoją trasą z GTFS – nie liczymy dla nich
+    // trasy algorytmem Dijkstry, bo jest już znana z pliku GTFS.
+    for (let k = 1; k <= v.route.length; k++) {
+      const idx = (v.si + k - 1) % v.route.length;
+      const d = v.route[idx];
+      if (d === from || this.edgeBetween(from, d) === undefined) continue;
+      v.dest = d;
+      v.si = idx;
+      v.nodes = this.routeTail(from, idx);
+      if (v.nodes.length) return true;
     }
     this.respawn(v);
     return false;
   }
-  private respawn(v: Veh) {
-    let id = 0;
-    for (let i = 0; i < 50; i++) { id = Math.floor(this.rnd() * this.edges.length); const e = this.edges[id]; if (!e.closed && !e.pedestrian) break; }
-    const e = this.edges[id];
-    v.edge = id; v.dir = this.rnd() < 0.5 ? 1 : -1; v.s = this.rnd() * e.len; v.nodes = []; v.speed = e.speedLimit * 0.5;
+
+  /** Węzły od `from` do indeksu `idx` w trasie pojazdu. */
+  private routeTail(from: number, idx: number): number[] {
+    const out: number[] = [];
+    const route = this.vehRoute;
+    for (let k = 1; k <= route.length; k++) {
+      const i = (idx + k) % route.length;
+      out.push(route[i]);
+      if (i === from) break;
+    }
+    return out;
   }
+
+  respawn(v: Veh) {
+    let id = 0;
+    for (let i = 0; i < 60; i++) {
+      id = Math.floor(this.rnd() * this.roads.length);
+      const r = this.roads[id];
+      if (!r.closed && !r.pedestrian && r.edge.carAccess && r.edge.capacity > 0) break;
+    }
+    const r = this.roads[id];
+    v.edge = id;
+    v.dir = this.rnd() < 0.5 ? 1 : -1;
+    v.s = this.rnd() * r.edge.len;
+    v.nodes = [];
+    v.speed = r.edge.speedLimit * 0.5;
+    v.dest = -1;
+    this.locate(v);
+  }
+
   private arrive(v: Veh, node: number, over: number) {
-    if (v.nodes.length && this.blocked(node, v.nodes[0], v.kind)) v.nodes = this.path(node, v.dest, v.kind) ?? []; // droga zamknięta: objazd
+    if (v.nodes.length) {
+      const e = this.edgeBetween(node, v.nodes[0]);
+      if (e === undefined || this.cost(this.roads[e], v.kind) === Infinity) {
+        v.nodes = this.path(node, v.dest, v.kind) ?? [];
+      }
+    }
+    if (v.stuck > 0) { v.stuck--; return; }
     if (!v.nodes.length && !this.pickDest(v, node)) return;
     const nx = v.nodes.shift()!;
-    const id = this.eid.get(node * 64 + nx)!;
-    v.edge = id; v.dir = this.edges[id].a === node ? 1 : -1; v.s = over;
+    const id = this.edgeBetween(node, nx);
+    if (id === undefined) {
+      // Grac zamknął odcinek trasy – wracamy do początku kursu i jedziemy dalej.
+      v.nodes = v.kind === CAR ? [] : v.route.slice(1);
+      v.dest = v.kind === CAR ? -1 : (v.route[1] ?? -1);
+      v.si = 0;
+      return;
+    }
+    v.edge = id;
+    v.dir = this.roads[id].edge.a === node ? 1 : -1;
+    v.s = over;
   }
+
   private move(v: Veh, dt: number) {
-    const e = this.edges[v.edge];
-    if (v.dwell > 0) { v.dwell -= dt; v.speed = 0; }
+    if (v.kind !== CAR) this.vehRoute = v.route;
+    const r = this.roads[v.edge];
+    const e = r.edge;
+    if (v.dwell > 0) { v.dwell -= dt; v.speed *= 0.9; }
     else {
-      let t = v.kind === 2 ? 9 : e.speedLimit * Math.max(0.12, 1 - 0.88 * Math.pow(Math.min(1, e.trafficLevel), 1.5));
-      if (v.kind === 1) t *= 0.85;
-      v.speed += (t - v.speed) * Math.min(1, dt * 1.5);
+      if (r.destroyed || r.closure === 'closed') { v.speed = 0; v.dwell = Math.max(v.dwell, 1); return; }
+      const congestionFactor = v.kind === TRAM ? 0.85 : Math.max(0.12, 1 - 0.85 * Math.pow(Math.min(1, r.level), 1.5));
+      let target = v.kind === TRAM ? 11 : e.speedLimit * congestionFactor;
+      // Zimno i śnieg – realna pogoda z Open-Meteo spowalnia ruch.
+      if (this.temp < 2) target *= 0.9;
+      if (v.kind === BUS) target *= 0.88;
+      v.speed += (target - v.speed) * Math.min(1, dt * 1.4);
       const before = v.s;
       v.s += v.speed * dt;
-      if (v.kind && e.hasStop && before < e.len / 2 && v.s >= e.len / 2) v.dwell = 4; // postój na przystanku
+      const hasStop = r.realStop || r.addedStop;
+      if (hasStop && v.kind !== CAR && before < e.len / 2 && v.s >= e.len / 2) v.dwell = 3.5;
       if (v.s >= e.len) this.arrive(v, v.dir > 0 ? e.b : e.a, v.s - e.len);
     }
-    const c = this.edges[v.edge];
-    const t = v.dir > 0 ? v.s : c.len - v.s;
-    const hx = c.hx * v.dir, hz = c.hz * v.dir, off = v.kind === 2 ? 0 : 2.2;
-    v.x = c.ax + c.hx * t - hz * off;
-    v.z = c.az + c.hz * t + hx * off;
+    this.locate(v);
+  }
+
+  /**
+   * Odstępy między pojazdami. Tramwaje nie mogą się wbić w siebie ani przejeżdżać
+   * przez budynki – tu pilnujemy tylko odległości na tym samym odcinku.
+   * Pojazdy grupujemy po odcinku i kierunku, sortujemy po pozycji i cofamy
+   * tego, który jest zbyt blisko (tzw. model followera).
+   */
+  private enforceSpacing() {
+    const byEdge = this.laneBuckets;
+    byEdge.clear();
+    for (const v of this.veh) {
+      const arr = byEdge.get(v.edge);
+      if (arr) arr.push(v); else byEdge.set(v.edge, [v]);
+    }
+    for (const arr of byEdge.values()) {
+      if (arr.length < 2) continue;
+      arr.sort(cmpVeh);
+      for (let i = 1; i < arr.length; i++) {
+        const a = arr[i - 1], b = arr[i];
+        if (a.dir !== b.dir) continue;
+        const gap = b.s - a.s;
+        if (gap >= 0) continue;
+        const need = minGap(b.kind);
+        if (-gap >= need) continue;
+        // cofamy b (i ewentualnie a) do wymaganego odstępu
+        b.s = a.s + need;
+        b.speed = 0;
+        if (b.dwell <= 0) b.dwell = 0.05;
+      }
+    }
+  }
+
+  private laneBuckets = new Map<number, Veh[]>();
+
+  private locate(v: Veh) {
+    const e = this.roads[v.edge].edge;
+    const t = v.dir > 0 ? v.s : e.len - v.s;
+    const off = v.kind === TRAM ? 0 : v.kind === BUS ? 2.4 : 2.0;
+    const hx = e.hx * v.dir, hz = e.hz * v.dir;
+    v.x = e.ax + e.hx * t - hz * off;
+    v.z = e.az + e.hz * t + hx * off;
     v.yaw = Math.atan2(-hz, hx);
   }
 
-  // ---------- piesi ----------
-  private reweight() {
-    for (const e of this.edges) {
-      const mx = (e.ax + e.bx) / 2, mz = (e.az + e.bz) / 2;
-      let w = 1 + (e.pedestrian ? 6 : 0) + (e.closed ? 3 : 0) + (e.name === 'Rynek Główny' ? 3 : 0) + (e.hasStop ? 2 : 0);
-      for (const p of this.parks) if (Math.hypot(p.x - mx, p.z - mz) < 70) w += 5;
-      e.pw = w;
+  /* ------------------------------------------- komunikacja na realnych trasach */
+
+  /** Gęstość symulowanych pojazdów MPK wynika z długości trasy z GTFS. */
+  private retargetTransit() {
+    const want = new Map<number, number>();
+    for (const r of this.routes) {
+      if (r.nodes.length < 4) continue;
+      const len = this.routeLength(r);
+      want.set(r.index, Math.max(1, Math.min(4, Math.round(len / 900))));
     }
-  }
-  private pickPedEdge() {
-    let tot = 0;
-    for (const e of this.edges) tot += e.pw;
-    let r = this.rnd() * tot;
-    for (const e of this.edges) { r -= e.pw; if (r <= 0) return e.id; }
-    return 0;
-  }
-  private placePed(p: Ped, id: number) {
-    p.edge = id; p.dir = this.rnd() < 0.5 ? 1 : -1; p.s = this.rnd() * this.edges[id].len; this.locPed(p);
-  }
-  private locPed(p: Ped) {
-    const e = this.edges[p.edge];
-    const t = p.dir > 0 ? p.s : e.len - p.s;
-    const off = e.pedestrian || e.closed ? p.jit * 4 : p.side * 6.2;
-    p.x = e.ax + e.hx * t - e.hz * off;
-    p.z = e.az + e.hz * t + e.hx * off;
-  }
-  private movePed(p: Ped, dt: number) {
-    const e = this.edges[p.edge];
-    p.s += p.speed * dt;
-    if (p.s >= e.len) {
-      const node = p.dir > 0 ? e.b : e.a, opts = this.adj[node];
-      const ws = opts.map((o) => (o.e === p.edge && opts.length > 1 ? 0 : this.edges[o.e].pw));
-      let r = this.rnd() * ws.reduce((a, b) => a + b, 0), pick = opts[0];
-      for (let i = 0; i < opts.length; i++) { r -= ws[i]; if (r <= 0) { pick = opts[i]; break; } }
-      p.edge = pick.e; p.dir = this.edges[pick.e].a === node ? 1 : -1; p.s = p.s - e.len;
-    }
-    this.locPed(p);
+    this.transitVehPerRoute = want;
   }
 
-  // ---------- metryki ----------
+  private routeLength(r: SimRoute): number {
+    let len = 0;
+    for (let i = 1; i < r.nodes.length; i++) {
+      const id = this.edgeBetween(r.nodes[i - 1], r.nodes[i]);
+      if (id !== undefined) len += this.roads[id].edge.len;
+    }
+    return len;
+  }
+
+  private respawnAllTransit() {
+    // Usuwamy symulowane pojazdy MPK, gdy zmienił się zestaw tras.
+    const keep = new Set<number>();
+    for (const v of this.veh) {
+      if (v.kind === CAR) keep.add(this.veh.indexOf(v));
+    }
+    this.veh = this.veh.filter((v) => v.kind === CAR);
+
+    for (const r of this.routes) {
+      const want = this.transitVehPerRoute.get(r.index) ?? 0;
+      for (let i = 0; i < want; i++) this.spawnRouteVehicle(r);
+    }
+    void keep;
+  }
+
+  /** Wstawia jeden pojazd MPK w losowym miejscu jego realnej trasy GTFS. */
+  private spawnRouteVehicle(r: SimRoute) {
+    if (r.nodes.length < 2) return;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const startAt = Math.floor(this.rnd() * r.nodes.length);
+      const node = r.nodes[startAt];
+      const next = r.nodes[(startAt + 1) % r.nodes.length];
+      const id = this.edgeBetween(node, next);
+      if (id === undefined) continue;
+      const v = this.newVeh(r.kind === 'tram' ? TRAM : BUS, r.ref, r.nodes);
+      v.variant = this.rnd();
+      v.edge = id;
+      v.dir = this.roads[id].edge.a === node ? 1 : -1;
+      v.s = this.rnd() * this.roads[id].edge.len;
+      v.si = startAt;
+      v.dest = next;
+      v.stuck = 0;
+      // Ścieżka na całą trasę – pojazdy MPK jadą swoim realnym kursem.
+      v.nodes = r.nodes.slice(startAt + 1);
+      this.locate(v);
+      this.veh.push(v);
+      return;
+    }
+  }
+
+  private newVeh(kind: VehKind, ref: string, route: number[]): Veh {
+    return { kind, ref, route, si: 0, edge: 0, dir: 1, s: 0, speed: 0, dest: -1, stuck: 0, nodes: [], dwell: 0, x: 0, z: 0, yaw: 0, variant: 0.5 };
+  }
+
+  private spawnCar() {
+    const v = this.newVeh(CAR, '', []);
+    v.variant = this.rnd();
+    this.respawn(v);
+    this.veh.push(v);
+  }
+
+  /* ------------------------------------------------------------- piesi */
+
+  private reweight() {
+    for (const r of this.roads) {
+      const mx = (r.edge.ax + r.edge.bx) / 2, mz = (r.edge.az + r.edge.bz) / 2;
+      let w = 1;
+      if (r.pedestrian) w += 7;
+      if (r.closed) w += 4;
+      if (r.edge.roadClass === 'pedestrian' || r.edge.roadClass === 'living_street') w += 6;
+      if (r.realStop || r.addedStop) w += 3;
+      if (r.transit) w += 2;
+      for (const p of this.parks) if (Math.hypot(p.x - mx, p.z - mz) < p.r + 40) w += 6;
+      r.walkWeight = w;
+    }
+    this.peds_ = new PedestrianPool(this.g, this.rnd, MAX_PEDS);
+    this.peds = this.peds_.peds;
+    const active = Math.round(this.activePeds);
+    for (let i = 0; i < Math.min(active, MAX_PEDS); i++) this.peds_.place(this.peds[i], this.pickPedEdge());
+  }
+
+  private pickPedEdge(): number {
+    let total = 0;
+    for (const r of this.roads) total += r.walkWeight;
+    let x = this.rnd() * total;
+    for (const r of this.roads) { x -= r.walkWeight; if (x <= 0) return r.edge.id; }
+    return 0;
+  }
+
+  /* ------------------------------------------------------------ metryki */
+
   private metrics() {
-    let tot = 0, carLen = 0, tlSum = 0, ped = 0, closed = 0;
-    for (const e of this.edges) {
-      tot += e.len;
-      if (e.pedestrian) ped += e.len;
-      if (e.closed) closed += e.len;
-      if (!e.closed && !e.pedestrian) { carLen += e.len; tlSum += Math.min(1, e.trafficLevel) * e.len; }
+    let carLen = 0, tlSum = 0, total = 0, closedLen = 0, pedLen = 0;
+    for (const r of this.roads) {
+      total += r.edge.len;
+      if (r.closed || r.closure === 'closed' || r.destroyed) closedLen += r.edge.len;
+      if (r.pedestrian) pedLen += r.edge.len;
+      if (!r.destroyed && r.closure !== 'closed' && !r.pedestrian && r.edge.carAccess) {
+        carLen += r.edge.len;
+        tlSum += Math.min(1, r.level) * r.edge.len;
+      }
     }
     let sr = 0, sn = 0, tr = 0, tn = 0;
     for (const v of this.veh) {
-      const lim = this.edges[v.edge].speedLimit;
-      if (v.kind === 0) { sr += Math.min(1, v.speed / lim); sn++; } else { tr += Math.min(1, v.speed / (v.kind === 2 ? 9 : lim)); tn++; }
+      const lim = this.roads[v.edge].edge.speedLimit;
+      if (v.kind === CAR) { sr += Math.min(1, v.speed / lim); sn++; }
+      else { tr += Math.min(1, v.speed / (v.kind === TRAM ? 11 : lim)); tn++; }
     }
-    const tl = carLen ? tlSum / carLen : 0, np = this.parks.length;
-    const traffic = clamp(55 * tl + 45 * (1 - (sn ? sr / sn : 1)));
-    const noise = clamp(18 + 85 * (tlSum / tot) + (this.activePeds / MAX_PEDS) * 8 - np * 2.5);
-    const pollution = clamp(10 + 0.45 * traffic + 20 * (tlSum / tot) - np * 4 - (ped / tot) * 40);
-    const transit = clamp(20 + this.stops.length * 2 + 45 * (tn ? tr / tn : 1));
-    const target = clamp(130 + ped / 5 + closed / 8 + np * 22 + this.stops.length * 4, 60, MAX_PEDS);
+    const tl = carLen ? tlSum / carLen : 0;
+    const np = this.parks.length;
+    const clamp = (v: number, a = 0, b = 100) => Math.max(a, Math.min(b, v));
+    const traffic = clamp(58 * tl + 42 * (1 - (sn ? sr / sn : 1)));
+    // Hałas: głośniej blisko tras z komunikacją i na ulicach z ruchem.
+    const noise = clamp(16 + 88 * (tlSum / Math.max(1, total)) + (this.activePeds / MAX_PEDS) * 8 + this.realVehicles.length * 0.05 - np * 2.5 + this.disasterMood.noise);
+    // Smog: ruch + tło z modelu jakości powietrza (PREDICTED, nie pomiar).
+    const pollution = clamp(8 + 0.5 * traffic + 24 * (tlSum / Math.max(1, total)) * this.airFactor - np * 4 - (pedLen / Math.max(1, total)) * 45 + this.disasterMood.pollution);
+    const realTransitShare = Math.min(35, this.realVehicles.length * 0.25);
+    const transit = clamp(18 + this.stops.length * 0.4 + realTransitShare + 45 * (tn ? tr / tn : 1));
+    const target = clamp(240 + pedLen / 5 + closedLen / 8 + np * 24 + this.stops.length * 0.35, 80, MAX_PEDS);
     const old = Math.round(this.activePeds);
-    this.activePeds += clamp(target - this.activePeds, -12, 12);
-    for (let i = old; i < Math.round(this.activePeds); i++) this.placePed(this.peds[i], this.pickPedEdge()); // nowi piesi pojawiają się tam, gdzie ich ciągnie
-    const pedestrians = clamp((this.activePeds / MAX_PEDS) * 150);
-    const nPed = this.edges.filter((e) => e.pedestrian).length, nClosed = this.edges.filter((e) => e.closed).length;
-    const satT = clamp(78 - 0.3 * traffic - 0.15 * pollution - 0.2 * noise + 0.12 * pedestrians + 0.12 * (transit - 50) + np * 3 + nPed * 1.5 - nClosed * 2.5);
+    this.activePeds += clamp(target - this.activePeds, -18, 18);
+    const now = Math.round(this.activePeds);
+    for (let i = Math.min(old, now); i < now && i < MAX_PEDS; i++) this.peds_.place(this.peds[i], this.pickPedEdge());
+    const pedestrians = clamp((this.activePeds / MAX_PEDS) * 155);
+    const nClosed = this.roads.filter((r) => r.closure === 'closed' || r.destroyed).length;
+    const nPed = this.roads.filter((r) => r.pedestrian).length;
+    // Przyjemność rośnie w chłodny dzień, spada w smog i korki.
+    const weatherBonus = this.temp < 24 && this.temp > 2 ? 6 : this.temp >= 24 ? -4 : -8;
+    const satT = clamp(
+      74 - 0.32 * traffic - 0.14 * pollution - 0.2 * noise + 0.11 * pedestrians
+      + 0.1 * (transit - 50) + np * 3 + nPed * 1.4 - nClosed * 2.4 + weatherBonus
+      - (this.airFactor - 1) * 12 + this.disasterMood.satisfaction,
+    );
     const m = this.m;
     this.m = {
       traffic, transit, pedestrians, pollution, noise,
       satisfaction: m.satisfaction + (satT - m.satisfaction) * 0.1,
-      budget: m.budget + 1.5 + m.satisfaction * 0.03 + pedestrians * 0.02 - this.stops.length * 0.05 - np * 0.08,
+      budget: m.budget + 1.4 + m.satisfaction * 0.03 + pedestrians * 0.02 - this.stops.length * 0.02 - np * 0.08,
     };
   }
-  snapshot() { return { ...this.m, cars: N_CARS, peds: Math.round(this.activePeds), time: this.time }; }
 
-  // ---------- akcje gracza (zwracają komunikat błędu albo null) ----------
-  private spend(c: number) { if (this.m.budget < c) return false; this.m.budget -= c; return true; }
-  private changed() {
+  /* --------------------------------------------------------- predykcja */
+
+  private runAssignment() {
+    if (!this.assignment) return;
+    this.assignment.run();
+    this.applyAssignment();
+    this.assignAt = Date.now();
+    this.assignIterations = this.assignment.result.iterations;
+  }
+
+  /**
+   * Usuwa pojazdy, które wypadły poza obszar symulacji.
+   * Trasa z GTFS bywa przycięta do bboxa, a po zamknięciu ulicy pojazd może
+   * zawinąć poza mapę – taki agent jest usuwany, żeby nie jeździł w nicości
+   * i nie kosztował mocy obliczeniowej.
+   */
+  cullOutsideArea(): number {
+    const area = this.city?.area;
+    if (!area) return 0;
+    const mLon = 111_320 * Math.cos((area.origin.lat * Math.PI) / 180);
+    const halfX = ((area.maxLon - area.origin.lon) * mLon) / 2 + 120;
+    const halfZ = ((area.origin.lat - area.minLat) * 111_320) / 2 + 120;
+    const before = this.veh.length;
+    this.veh = this.veh.filter((v) => !(Math.abs(v.x) > halfX || v.z < -halfZ || v.z > halfZ));
+    const removed = before - this.veh.length;
+    if (removed) this.respawnTransit();
+    return removed;
+  }
+
+  /** Uzupełnia brakujące pojazdy MPK po usunięciu tych, które wypadły z mapy. */
+  private respawnTransit() {
+    const have = new Set(this.veh.filter((v) => v.kind !== CAR).map((v) => v.ref + v.route.length));
+    for (const r of this.routes) {
+      const want = this.transitVehPerRoute.get(r.index) ?? 0;
+      if (!want) continue;
+      const count = this.veh.filter((v) => v.kind !== CAR && v.ref === r.ref && v.route === r.nodes).length;
+      for (let i = count; i < want; i++) this.spawnRouteVehicle(r);
+    }
+    void have;
+  }
+
+  /** Po zmianach gracza zbiór zamkniętych ulic trzeba zbudować od nowa. */
+  invalidateRouting() {
+    this.blockedCache = null;
+    this.trees.clear();
+  }
+
+  private applyAssignment() {
+    if (!this.assignment) return;
+    const { level } = this.assignment.result;
+    for (let i = 0; i < this.roads.length; i++) {
+      const r = this.roads[i];
+      r.predicted = r.closed || r.pedestrian || !r.edge.carAccess ? 0 : Math.min(1.1, level[i]);
+    }
+  }
+
+  /** Wywoływane po każdej decyzji gracza – natychmiastowa predykcja konsekwencji. */
+  reroute() {
     this.version++;
-    this.reweight();
-    for (const v of this.veh) { // natychmiastowy objazd wszystkich pojazdów
-      if (v.kind === 2 || !v.nodes.length) continue;
-      const e = this.edges[v.edge];
-      v.nodes = this.path(v.dir > 0 ? e.b : e.a, v.dest, v.kind) ?? [];
+    this.trees.clear();
+    this.runAssignment();
+    for (const v of this.veh) {
+      if (v.kind !== CAR || v.dest < 0) continue;
+      const e = this.roads[v.edge].edge;
+      const from = v.dir > 0 ? e.b : e.a;
+      v.nodes = this.path(from, v.dest, v.kind) ?? [];
     }
   }
+
+  /* ------------------------------------------------------------ akcje */
+
+  private spend(c: number) { if (this.m.budget < c) return false; this.m.budget -= c; return true; }
+
   setClosed(id: number, closed: boolean): string | null {
-    const e = this.edges[id];
-    if (e.closed === closed) return null;
+    const r = this.roads[id];
+    if (!r || r.closed === closed) return null;
     if (closed) {
-      if (this.edges.filter((x) => !x.closed && !x.pedestrian).length <= 8) return 'Zostaw otwartych kilka ulic, inaczej auta nie mają którędy jechać.';
+      if (this.roads.filter((x) => !x.closed && !x.pedestrian && x.edge.carAccess).length <= 12) {
+        return 'Zostaw otwartych kilka ulic, inaczej auta nie mają którędy jechać.';
+      }
       if (!this.spend(COST.close)) return 'Za mało środków w budżecie.';
-      e.pedestrian = false;
     }
-    e.closed = closed; this.changed(); return null;
+    r.closed = closed;
+    this.reweight();
+    this.invalidateRouting();
+    this.reroute();
+    return null;
   }
+
   setPedestrian(id: number, on: boolean): string | null {
-    const e = this.edges[id];
-    if (e.pedestrian === on) return null;
+    const r = this.roads[id];
+    if (!r || r.pedestrian === on) return null;
     if (on) {
-      if (this.edges.filter((x) => !x.closed && !x.pedestrian).length <= 8) return 'Zostaw otwartych kilka ulic, inaczej auta nie mają którędy jechać.';
+      if (this.roads.filter((x) => !x.closed && !x.pedestrian && x.edge.carAccess).length <= 12) {
+        return 'Zostaw otwartych kilka ulic, inaczej auta nie mają którędy jechać.';
+      }
       if (!this.spend(COST.pedestrian)) return 'Za mało środków w budżecie.';
-      e.closed = false;
     }
-    e.pedestrian = on; this.changed(); return null;
+    r.pedestrian = on;
+    this.reweight();
+    this.invalidateRouting();
+    this.reroute();
+    return null;
   }
+
   addStop(id: number): string | null {
-    const e = this.edges[id];
-    if (e.hasStop) return 'Na tym odcinku jest już przystanek.';
-    if (e.closed) return 'Nie dodasz przystanku na zamkniętej ulicy.';
-    if (e.len < 60) return 'Odcinek jest za krótki na przystanek.';
+    const r = this.roads[id];
+    if (!r) return 'Nieznany odcinek.';
+    if (r.addedStop) return 'Na tym odcinku jest już Twój przystanek.';
+    if (r.realStop) return 'Tu już jest prawdziwy przystanek MPK.';
+    if (r.closed) return 'Nie dodasz przystanku na zamkniętej ulicy.';
+    if (r.edge.len < 60) return 'Odcinek jest za krótki na przystanek.';
     if (!this.spend(COST.stop)) return 'Za mało środków w budżecie.';
-    e.hasStop = true; this.stops.push({ edge: id, name: `Nowy przystanek, ${e.name}` }); this.changed(); return null;
+    r.addedStop = true;
+    this.stops.push({ roadId: id, name: `Nowy przystanek, ${r.edge.name}`, lines: [] });
+    this.reweight();
+    this.invalidateRouting();
+    this.reroute();
+    return null;
   }
+
   addPark(x: number, z: number): string | null {
-    if (Math.abs(x) > 430 || z < -330 || z > 480) return 'Poza obszarem miasta.';
-    if (Math.abs(x) < 95 && Math.abs(z) < 95) return 'Rynek zostaje placem. Wybierz miejsce poza nim.';
-    if (distToRoads(this.edges, x, z) < 9) return 'Za blisko jezdni. Kliknij w środek kwartału.';
-    if (this.parks.some((p) => Math.hypot(p.x - x, p.z - z) < 45)) return 'W tym miejscu jest już park.';
+    const area = this.city?.area;
+    const maxX = ((area ? area.maxLon - area.origin.lon : 0.011) * 111320 * Math.cos((50.06 * Math.PI) / 180));
+    const maxZ = ((area ? area.origin.lat - area.minLat : 0.009) * 111320);
+    if (Math.abs(x) > maxX || z < -maxZ || z > maxZ) return 'Poza obszarem miasta.';
+    if (this.parks.some((p) => Math.hypot(p.x - x, p.z - z) < 50)) return 'W tym miejscu jest już park.';
+    if (this.roads.some((r) => Math.hypot((r.edge.ax + r.edge.bx) / 2 - x, (r.edge.az + r.edge.bz) / 2 - z) < 0)) {
+      // za blisko drogi – sprawdzamy dokładnie
+      if (this.roads.some((r) => distToSegment(r.edge, x, z) < 14)) return 'Za blisko jezdni. Kliknij w środek kwartału.';
+    }
     if (!this.spend(COST.park)) return 'Za mało środków w budżecie.';
-    this.parks.push({ x, z, r: 26 }); this.changed(); return null;
+    this.parks.push({ x, z, r: 26 });
+    this.reweight();
+    this.invalidateRouting();
+    this.reroute();
+    return null;
   }
+
+  /* ------------------------------------------------- akcje gracza (v2) */
+
+  /** Przystanek autobusowy albo tramwajowy w wybranym przez gracza punkcie. */
+  addStopAt(roadId: number, mode: 'bus' | 'tram'): string | null {
+    const r = this.roads[roadId];
+    if (!r) return 'Nie kliknij ulicy.';
+    if (r.destroyed || r.closure === 'closed') return 'Nie postawisz przystanku na zamkniętej ulicy.';
+    if (r.addedStop) return 'Na tym odcinku masz już swój przystanek.';
+    if (r.realStop) {
+      const isTramReal = this.g.edges[roadId].hasTram || this.g.edges[roadId].roadClass === 'tram';
+      if (isTramReal === (mode === 'tram')) return 'Tu już jest prawdziwy przystanek MPK tego rodzaju.';
+    }
+    const cost = mode === 'tram' ? COST.stopTram : COST.stop;
+    if (r.edge.len < 45) return 'Odcinek jest za krótki na przystanek.';
+    if (!this.spend(cost)) return 'Za mało środków w budżecie.';
+
+    const stop: NewStop = { roadId, mode, name: mode === 'tram' ? `Nowy przystanek tramwajowy` : `Nowy przystanek autobusowy`, cost, at: Date.now() };
+    const apply = () => {
+      this.playerStops.push(stop);
+      r.addedStop = true;
+      if (mode === 'tram') r.transit = true;
+      this.reweight();
+      this.invalidateRouting();
+      this.reroute();
+    };
+    const revert = () => {
+      this.playerStops = this.playerStops.filter((x) => x !== stop);
+      r.addedStop = false;
+      this.reweight();
+      this.invalidateRouting();
+      this.reroute();
+    };
+    apply();
+    this.history.push({ label: `przystanek ${mode === 'tram' ? 'tramwajowy' : 'autobusowy'} (${r.edge.name})`, at: Date.now(), apply, revert });
+    return null;
+  }
+
+  /** Zamknięcie ulicy wyłącznie dla samochodów – tramwaje jadą dalej. */
+  setCarsOnly(id: number, on: boolean): string | null {
+    const r = this.roads[id];
+    if (!r) return 'Nieznany odcinek.';
+    const hasTransit = r.edge.hasTram || r.edge.roadClass === 'tram';
+    if (on && !hasTransit) return 'Tą ulicą nie jeżdżą tramwaje – użyj zwykłego zamknięcia.';
+    if ((r.closure === 'cars-only') === on) return null;
+    if (on && this.roads.filter((x) => !x.destroyed && x.closure !== 'closed' && !x.pedestrian && x.edge.carAccess).length <= 12) {
+      return 'Zostaw otwartych kilka ulic dla aut.';
+    }
+    if (on && !this.spend(COST.carsOnly)) return 'Za mało środków w budżecie.';
+    const apply = () => {
+      r.closure = on ? 'cars-only' : 'none';
+      r.pedestrian = false;
+      this.reweight();
+      this.invalidateRouting();
+      this.reroute();
+    };
+    const revert = () => {
+      r.closure = on ? 'none' : 'cars-only';
+      this.reweight();
+      this.invalidateRouting();
+      this.reroute();
+    };
+    apply();
+    this.history.push({ label: on ? `zamknięcie dla aut: ${r.edge.name}` : `otwarcie dla aut: ${r.edge.name}`, at: Date.now(), apply, revert });
+    return null;
+  }
+
+  /** Nowy budynek: centrum handlowe albo uczelnia. */
+  addStructure(kind: 'mall' | 'university', x: number, z: number): string | null {
+    const area = this.city?.area;
+    const mLon = 111_320 * Math.cos(((area?.origin.lat ?? 50.06) * Math.PI) / 180);
+    const halfX = ((area ? area.maxLon - area.origin.lon : 0.011) * mLon) / 2 - 20;
+    const halfZ = ((area ? area.origin.lat - area.minLat : 0.009) * 111_320) / 2 - 20;
+    if (Math.abs(x) > halfX || Math.abs(z) > halfZ) return 'Poza obszarem miasta.';
+    const w = kind === 'mall' ? 78 : 62, d = kind === 'mall' ? 66 : 54;
+    const clash = this.playerBuildings.some((b) => Math.hypot(b.x - x, b.z - z) < Math.max(b.w, b.d));
+    if (clash) return 'Za blisko innego budynku.';
+    const cost = kind === 'mall' ? COST.mall : COST.university;
+    if (!this.spend(cost)) return 'Za mało środków w budżecie.';
+
+    const b: PlayerBuilding = {
+      id: this.playerBuildings.length,
+      x, z, w, d,
+      h: kind === 'mall' ? 14 : 22,
+      kind,
+      name: kind === 'mall' ? 'Nowe centrum handlowe' : 'Nowa uczelnia',
+    };
+    const apply = () => {
+      this.playerBuildings.push(b);
+      this.reweight();
+      this.reroute();
+    };
+    const revert = () => {
+      this.playerBuildings = this.playerBuildings.filter((p) => p !== b);
+      this.reweight();
+      this.reroute();
+    };
+    apply();
+    // nowy cel ruchu: budynki przyciągają pojazdy
+    this.hubs = [...this.hubs, this.nearestCarNode(x, z)].filter((n) => n >= 0);
+    this.history.push({ label: b.name, at: Date.now(), apply, revert });
+    return null;
+  }
+
+  /** Nowa droga / autostrada łącząca dwa punkty – wstawiana do grafu. */
+  addRoad(x1: number, z1: number, x2: number, z2: number, highway: boolean): string | null {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    if (len < 60) return 'Droga musi mieć co najmniej 60 m.';
+    if (len > 900) return 'Droga może mieć maksymalnie 900 m.';
+    if (!this.spend(highway ? COST.road * 2 : COST.road)) return 'Za mało środków w budżecie.';
+
+    const a = this.g.nodes.length, b = a + 1;
+    this.g.nodes.push({ x: x1, z: z1 }, { x: x2, z: z2 });
+    const id = this.g.edges.length;
+    const speed = highway ? 120 / 3.6 : 60 / 3.6;
+    const lanes = highway ? 3 : 2;
+    this.g.edges.push({
+      id, name: highway ? 'Nowa autostrada' : 'Nowa droga', roadClass: highway ? 'primary' : 'residential',
+      a, b, ax: x1, az: z1, bx: x2, bz: z2,
+      hx: (x2 - x1) / len, hz: (z2 - z1) / len, len,
+      speedLimit: speed, capacity: Math.round(((highway ? 900 : 500) / 4) * lanes),
+      lanesForward: lanes, oneway: false, carAccess: true,
+      transit: false, hasTram: false, osmId: -1, at: [a, b],
+    });
+    (this.g.adj[a] ??= []).push({ e: id, to: b });
+    (this.g.adj[b] ??= []).push({ e: id, to: a });
+
+    const capacity = Math.round(((highway ? 900 : 500) / 4) * lanes);
+    const rs: RoadSim = {
+      edge: this.g.edges[id],
+      closure: 'none', destroyed: false,
+      baseline: highway ? 0.25 : 0.2, baselineOrigin: 'SIMULATED',
+      baselineSpeed: speed, predicted: 0.2, level: 0.1, capacity,
+      closed: false, pedestrian: false, addedStop: false, realStop: false,
+      transit: false, built: true, vehicles: 0, walkWeight: 1,
+    };
+    this.roads.push(rs);
+    this.costByRoad.set(id, capacity);
+
+    const apply = () => {
+      rs.closure = 'none';
+      rs.destroyed = false;
+      this.roadLoad = new Float32Array(this.roads.length);
+      this.invalidateRouting();
+      this.reroute();
+    };
+    const revert = () => {
+      this.roads = this.roads.filter((x) => x !== rs);
+      this.g.edges.splice(id, 1);
+      this.g.nodes.splice(b, 1);
+      this.g.nodes.splice(a, 1);
+      this.invalidateRouting();
+      this.reroute();
+    };
+    apply();
+    this.hubs = [...this.hubs, a].filter((n) => n >= 0);
+    this.history.push({ label: highway ? 'nowa autostrada' : 'nowa droga', at: Date.now(), apply, revert });
+    return null;
+  }
+
+  /** Najbliższy węzeł sieci zjazdowej – dla nowych celów ruchu. */
+  private nearestCarNode(x: number, z: number): number {
+    let best = -1, bd = Infinity;
+    for (const e of this.g.edges) {
+      if (!e.carAccess) continue;
+      const t = Math.max(0, Math.min(1, ((x - e.ax) * e.hx + (z - e.az) * e.hz)));
+      const d = Math.hypot(x - (e.ax + e.hx * e.len * t), z - (e.az + e.hz * e.len * t));
+      if (d < bd) { bd = d; best = t < 0.5 ? e.a : e.b; }
+    }
+    return best;
+  }
+
+  /* ------------------------------------------------------------ katastrofy */
+
+  /** Wywołuje katastrofę i od razu pokazuje jej skutki w modelu. */
+  triggerDisaster(kind: DisasterKind, cx: number, cz: number): string | null {
+    const def = DISASTERS[kind];
+    if (!this.spend(def.cost)) return 'Za mało środków w budżecie.';
+
+    const radius = kind === 'earthquake' ? 700 : kind === 'flood' ? 500 : 220;
+    const count = kind === 'earthquake' ? 9 : kind === 'flood' ? 7 : 2;
+    const hit = pickRoads(
+      this.roads.filter((r) => !r.built),
+      cx, cz, radius, count,
+      (r) => !r.destroyed && r.edge.carAccess,
+    );
+    const roads = hit.map((r) => r.edge.id);
+    const d: DisasterState = {
+      kind, roads, intensity: 1, startedAt: Date.now(),
+      label: def.label,
+    };
+    const apply = () => {
+      this.disasters.push(d);
+      for (const id of roads) {
+        const r = this.roads[id];
+        if (!r) continue;
+        if (kind === 'earthquake' || kind === 'fire') { r.destroyed = true; r.closure = 'none'; }
+        else if (kind === 'flood') { r.closure = 'closed'; }
+        else if (kind === 'blackout') { /* ulice przejezdne, ale wolniejsze */ }
+      }
+      this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
+      this.invalidateRouting();
+      this.reroute();
+    };
+    const revert = () => {
+      this.disasters = this.disasters.filter((x) => x !== d);
+      for (const id of roads) {
+        const r = this.roads[id];
+        if (!r) continue;
+        r.destroyed = false;
+        if (r.closure === 'closed') r.closure = 'none';
+      }
+      this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
+      this.invalidateRouting();
+      this.reroute();
+    };
+    apply();
+    this.history.push({
+      label: `${def.label} – ${roads.length} odcinków${kind === 'blackout' ? '' : ' zamkniętych'}`,
+      at: Date.now(), apply, revert,
+    });
+    return null;
+  }
+
+  /** Katastrofy wygasają z czasem; pożar i powódź są gaszone. */
+  private tickDisasters(dt: number) {
+    if (!this.disasters.length) { this.disasterSpeed = 1; return; }
+    for (const d of this.disasters) {
+      if (d.kind === 'blackout') {
+        // awaria sieci trwa kilka minut, potem wraca zasilanie
+        if ((Date.now() - d.startedAt) / 1000 > 240) d.intensity = Math.max(0, d.intensity - dt * 0.25);
+      } else {
+        d.intensity = Math.max(0, d.intensity - dt * 0.05);
+        // gaszenie: po 60 s odblokowujemy część odcinków
+        if (d.intensity < 0.25 && (d.kind === 'fire' || d.kind === 'flood')) {
+          for (const id of d.roads) {
+            const r = this.roads[id];
+            if (!r) continue;
+            if (r.destroyed && d.kind === 'fire') continue; // spalone odcinki zostają
+            if (r.closure === 'closed') r.closure = 'none';
+          }
+          this.invalidateRouting();
+        }
+      }
+    }
+    this.disasters = this.disasters.filter((d) => d.intensity > 0.02);
+    const p = disasterPenalty(this.disasters);
+    this.disasterSpeed = p.speed;
+    this.disasterMood = p;
+  }
+
+  /** Lista zmian gracza do pokazania w UI. */
+  playerChanges(): PlayerChange[] {
+    const out: PlayerChange[] = [];
+    for (const r of this.roads) {
+      if (r.destroyed) out.push({ roadId: r.edge.id, name: r.edge.name, change: 'destroyed' });
+      else if (r.closure === 'cars-only') out.push({ roadId: r.edge.id, name: r.edge.name, change: 'cars-only' });
+      else if (r.closure === 'closed') out.push({ roadId: r.edge.id, name: r.edge.name, change: 'closed' });
+      if (r.addedStop) out.push({ roadId: r.edge.id, name: r.edge.name, change: 'stop-bus' });
+    }
+    return out;
+  }
+
+  /** Cofnięcie ostatniej decyzji gracza. */
+  undo(): string | null {
+    const msg = this.history.undo();
+    if (msg) this.version++;
+    return msg;
+  }
+
+  /* --------------------------------------------------------- odczyty */
+
+  snapshot(): Snapshot {
+    const realTrams = this.realVehicles.filter((v) => v.type === 'tram').length;
+    const realBuses = this.realVehicles.filter((v) => v.type === 'bus').length;
+    return {
+      ...this.m,
+      cars: this.veh.filter((v) => v.kind === CAR).length,
+      vehiclesModelled: Math.round(this.carTarget * VEH_PER_AGENT),
+      peds: Math.round(this.activePeds),
+      trams: this.veh.filter((v) => v.kind === TRAM).length,
+      buses: this.veh.filter((v) => v.kind === BUS).length,
+      realVehicles: this.realVehicles.length,
+      realTrams, realBuses,
+      time: this.time,
+      closed: this.roads.filter((r) => r.closure === 'closed' || r.destroyed).length,
+      built: this.playerBuildings.length,
+      newStops: this.playerStops.length,
+      destroyed: this.destroyedCount,
+      disasters: this.disasters.length,
+      undoDepth: this.history.depth,
+      assignmentAt: new Date(this.assignAt).toISOString(),
+      assignmentIterations: this.assignIterations,
+    };
+  }
+
+}
+
+function distToSegment(e: GraphEdge, x: number, z: number): number {
+  const dx = e.bx - e.ax, dz = e.bz - e.az;
+  const l2 = dx * dx + dz * dz || 1;
+  const t = Math.max(0, Math.min(1, ((x - e.ax) * dx + (z - e.az) * dz) / l2));
+  return Math.hypot(x - (e.ax + dx * t), z - (e.az + dz * t));
 }

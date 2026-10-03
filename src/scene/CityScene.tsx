@@ -1,192 +1,272 @@
-import { memo, useLayoutEffect, useMemo, useRef } from 'react';
+/**
+ * Scena 3D (react-three-fiber).
+ *
+ * Warstwy: podłoże z wysokościami DEM, zieleń i woda z OSM, sieć drogowa
+ * z torowiskami, budynki z prawdziwych obrysów, przystanki GTFS, pojazdy
+ * (realne z GTFS-RT + symulowane), piesi, obiekty gracza i katastrofy.
+ */
+import { memo, useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
-import type { Edge, Sim } from '../simulation/sim';
-import { MAX_PEDS } from '../simulation/sim';
-import { genTrees, parkTrees, type B } from './buildings';
+import type { Sim } from '../simulation/sim';
+import type { CityData } from '../data/model';
+import { HeightField, setHeightField } from './terrain';
+import { Html } from '@react-three/drei';
+import {
+  areaExtent, Buildings, Closures, DisasterLayer, PlayerParks, PlayerStructures,
+  RoadNetwork, Terrain, TrafficView, TransitStops, Trees,
+} from './models/City';
+import { BusFleet, CarFleet, ObservedMarkers, PedestrianFleet, TramFleet } from './models/Fleets';
+import { PlacementGhost, type PlaceKind } from './models/Placement';
+import type { FleetPose, Sel } from './types';
 
-export type Tool = 'select' | 'park';
-export type Sel = { kind: 'road'; id: number } | { kind: 'building'; id: number } | null;
-interface Props { sim: Sim; ver: number; tool: Tool; speed: number; paused: boolean; sel: Sel; buildings: B[]; onSelect: (s: Sel) => void; onPark: (x: number, z: number) => void }
-
-const CAR_COLORS = ['#d9d4c7', '#2f3640', '#b3262e', '#3b6ea5', '#e0b23a', '#6b7f6a', '#8a8f98'];
-const roadWidth = (e: Edge) => (e.pedestrian ? 9 : e.name === 'Rynek Główny' ? 6 : e.speedLimit >= 14 ? 11 : 8);
+export interface CitySceneProps {
+  sim: Sim;
+  city: CityData;
+  ver: number;
+  tool: string;
+  speed: number;
+  paused: boolean;
+  sel: Sel;
+  trafficView: TrafficView;
+  layers: Set<string>;
+  placeKind: PlaceKind | null;
+  roadFrom: { x: number; z: number } | null;
+  selectedVehicle: string | null;
+  flyTo: { x: number; z: number; token: number } | null;
+  onSelect: (s: Sel) => void;
+  onGround: (x: number, z: number) => void;
+  onCommit: (x: number, z: number, x2: number, z2: number) => void;
+  onPickVehicle: (id: string, kind: 'tram' | 'bus') => void;
+}
 
 function Driver({ sim, speed, paused }: { sim: Sim; speed: number; paused: boolean }) {
-  useFrame((_, d) => { if (!paused) sim.advance(Math.min(d, 0.1) * speed); });
+  useFrame((_, d) => { if (!paused) sim.advance(Math.min(d, 0.12) * speed); });
   return null;
 }
 
-function Rig() {
+function Rig({ focus, flyTo }: { focus: [number, number]; flyTo: CitySceneProps['flyTo'] }) {
   const { camera } = useThree();
   const ctl = useRef<any>(null);
   const t = useRef(0), done = useRef(false);
-  const a = useMemo(() => new THREE.Vector3(420, 330, 540), []), b = useMemo(() => new THREE.Vector3(150, 105, 215), []);
-  useFrame((_, d) => {
+  const from = useMemo(() => new THREE.Vector3(focus[0] + 900, 620, focus[1] + 1100), [focus]);
+  const to = useMemo(() => new THREE.Vector3(focus[0] + 120, 220, focus[1] + 240), [focus]);
+  useEffect(() => {
+    camera.position.copy(from);
+    camera.lookAt(focus[0], 0, focus[1]);
+  }, [camera, from, focus]);
+  useEffect(() => {
+    if (!flyTo) return;
+    done.current = true;
+    const target = new THREE.Vector3(flyTo.x, 0, flyTo.z);
+    const start = camera.position.clone();
+    const end = new THREE.Vector3(flyTo.x + 110, 200, flyTo.z + 210);
+    const t0 = performance.now();
+    const step = () => {
+      const k = Math.min(1, (performance.now() - t0) / 1400);
+      const e = 1 - Math.pow(1 - k, 3);
+      camera.position.lerpVectors(start, end, e);
+      camera.lookAt(target);
+      if (k < 1) requestAnimationFrame(step);
+    };
+    step();
+  }, [flyTo?.token]);
+  useFrame((_, dt) => {
     if (done.current) return;
-    t.current = Math.min(1, t.current + d / 5);
-    camera.position.lerpVectors(a, b, 1 - Math.pow(1 - t.current, 3));
+    t.current = Math.min(1, t.current + dt / 5);
+    camera.position.lerpVectors(from, to, 1 - Math.pow(1 - t.current, 3));
+    if (ctl.current) { ctl.current.target.set(focus[0], 0, focus[1]); ctl.current.update(); }
     if (t.current >= 1) done.current = true;
-    ctl.current?.update();
   });
-  return <OrbitControls ref={ctl} makeDefault enableDamping dampingFactor={0.08} maxPolarAngle={Math.PI * 0.47} minDistance={25} maxDistance={900} target={[0, 0, 40]} onStart={() => { done.current = true; }} />;
-}
-
-function Ground({ tool, onSelect, onPark }: Pick<Props, 'tool' | 'onSelect' | 'onPark'>) {
-  const band = (x: number, z: number, w: number, d: number, c: string, y = 0.08) => (
-    <mesh position={[x, y, z]} receiveShadow><boxGeometry args={[w, 0.1, d]} /><meshStandardMaterial color={c} /></mesh>
-  );
   return (
-    <group>
-      <mesh rotation-x={-Math.PI / 2} receiveShadow onClick={(e: ThreeEvent<MouseEvent>) => { if (e.delta > 4) return; if (tool === 'park') onPark(e.point.x, e.point.z); else onSelect(null); }}>
-        <planeGeometry args={[3000, 3000]} /><meshStandardMaterial color="#c4bca7" />
-      </mesh>
-      {band(0, -263, 772, 46, '#7aa862')}{band(0, 263, 772, 46, '#7aa862')}{band(-363, 0, 46, 480, '#7aa862')}{band(363, 0, 46, 480, '#7aa862')}
-      {band(0, 0, 184, 184, '#dcd3bc', 0.06)}
-      {band(30, 548, 190, 80, '#8d8a72', 3)}
-    </group>
+    <OrbitControls ref={ctl} makeDefault enableDamping dampingFactor={0.09}
+      maxPolarAngle={Math.PI * 0.49} minDistance={18} maxDistance={2600}
+      target={[focus[0], 0, focus[1]]} onStart={() => { done.current = true; }} />
   );
 }
 
-function Buildings({ sim, ver, buildings, tool, onSelect, onPark }: Pick<Props, 'sim' | 'ver' | 'buildings' | 'tool' | 'onSelect' | 'onPark'>) {
-  const body = useRef<THREE.InstancedMesh>(null), roof = useRef<THREE.InstancedMesh>(null);
-  useLayoutEffect(() => {
-    const d = new THREE.Object3D(), c = new THREE.Color();
-    buildings.forEach((b, i) => {
-      const hide = !b.landmark && sim.parks.some((p) => Math.hypot(p.x - b.x, p.z - b.z) < p.r + b.w * 0.5), k = hide ? 0 : 1;
-      d.position.set(b.x, b.h / 2, b.z); d.scale.set(b.w * k, b.h * k, b.d * k); d.updateMatrix(); body.current!.setMatrixAt(i, d.matrix); body.current!.setColorAt(i, c.set(b.color));
-      d.position.set(b.x, b.h + 0.7, b.z); d.scale.set((b.w + 1.2) * k, 1.4 * k, (b.d + 1.2) * k); d.updateMatrix(); roof.current!.setMatrixAt(i, d.matrix); roof.current!.setColorAt(i, c.set(b.roof));
-    });
-    for (const m of [body.current!, roof.current!]) { m.instanceMatrix.needsUpdate = true; m.instanceColor!.needsUpdate = true; m.computeBoundingSphere(); }
-  }, [buildings, ver, sim]);
-  const click = (e: ThreeEvent<MouseEvent>) => {
-    e.stopPropagation();
-    if (e.delta > 4) return;
-    if (tool === 'park') onPark(e.point.x, e.point.z);
-    else if (e.instanceId != null) onSelect({ kind: 'building', id: e.instanceId });
-  };
-  return (
-    <>
-      <instancedMesh ref={body} args={[undefined, undefined, buildings.length]} castShadow receiveShadow onClick={click}><boxGeometry args={[1, 1, 1]} /><meshStandardMaterial /></instancedMesh>
-      <instancedMesh ref={roof} args={[undefined, undefined, buildings.length]} castShadow><boxGeometry args={[1, 1, 1]} /><meshStandardMaterial /></instancedMesh>
-    </>
-  );
+/** Niebieski podgląd miejsca ustawienia obiektu. */
+function Ghost({ kind, roadFrom, onCommit }: { kind: PlaceKind | null; roadFrom: { x: number; z: number } | null; onCommit: CitySceneProps['onCommit'] }) {
+  const pt = useRef({ x: 0, z: 0 });
+  return kind ? (
+    <PlacementGhost
+      kind={kind}
+      roadFrom={roadFrom}
+      point={pt}
+      onCommit={onCommit}
+    />
+  ) : null;
 }
 
-function Roads({ sim, ver, sel, tool, onSelect, onPark }: Pick<Props, 'sim' | 'ver' | 'sel' | 'tool' | 'onSelect' | 'onPark'>) {
-  const ref = useRef<THREE.InstancedMesh>(null), acc = useRef(0);
-  const col = useMemo(() => ({ a: new THREE.Color('#4b5261'), b: new THREE.Color('#e0a93a'), r: new THREE.Color('#dc4437'), t: new THREE.Color(), x: new THREE.Color('#6b2b2b'), p: new THREE.Color('#d9c9a3'), s: new THREE.Color('#5cc8ff') }), []);
-  const paint = () => {
-    const m = ref.current; if (!m) return;
-    sim.edges.forEach((e, i) => {
-      const k = Math.min(1, e.trafficLevel), t = col.t;
-      if (e.closed) t.copy(col.x); else if (e.pedestrian) t.copy(col.p);
-      else if (k < 0.5) t.lerpColors(col.a, col.b, k * 2); else t.lerpColors(col.b, col.r, (k - 0.5) * 2);
-      if (sel?.kind === 'road' && sel.id === i) t.lerp(col.s, 0.65);
-      m.setColorAt(i, t);
-    });
-    m.instanceColor!.needsUpdate = true;
-  };
-  useLayoutEffect(() => {
-    const d = new THREE.Object3D();
-    sim.edges.forEach((e, i) => {
-      d.position.set((e.ax + e.bx) / 2, 0.2, (e.az + e.bz) / 2); d.rotation.set(0, Math.atan2(-e.hz, e.hx), 0); d.scale.set(e.len + 4, 0.4, roadWidth(e)); d.updateMatrix(); ref.current!.setMatrixAt(i, d.matrix);
-    });
-    ref.current!.instanceMatrix.needsUpdate = true; paint(); ref.current!.computeBoundingSphere();
-  }, [sim, ver]);
-  useLayoutEffect(paint, [sel, ver]);
-  useFrame((_, dt) => { acc.current += dt; if (acc.current > 0.25) { acc.current = 0; paint(); } });
-  return (
-    <instancedMesh ref={ref} args={[undefined, undefined, sim.edges.length]} receiveShadow
-      onClick={(e: ThreeEvent<MouseEvent>) => { e.stopPropagation(); if (e.delta > 4) return; if (tool === 'park') onPark(e.point.x, e.point.z); else if (e.instanceId != null) onSelect({ kind: 'road', id: e.instanceId }); }}>
-      <boxGeometry args={[1, 1, 1]} /><meshStandardMaterial />
-    </instancedMesh>
-  );
-}
-
-const D = new THREE.Object3D();
-function sync(mesh: THREE.InstancedMesh | null, list: { x: number; z: number; yaw?: number }[], n: number, y: number, along = 0) {
-  if (!mesh) return;
-  for (let i = 0; i < n; i++) {
-    const v = list[i], yaw = v.yaw ?? 0;
-    D.position.set(v.x + Math.cos(yaw) * along, y, v.z - Math.sin(yaw) * along); D.rotation.set(0, yaw, 0); D.updateMatrix(); mesh.setMatrixAt(i, D.matrix);
-  }
-  mesh.count = n; mesh.instanceMatrix.needsUpdate = true;
-}
-function paintOnce(mesh: THREE.InstancedMesh | null, colors: string[]) {
-  if (!mesh) return; const c = new THREE.Color();
-  colors.forEach((s, i) => mesh.setColorAt(i, c.set(s))); mesh.instanceColor!.needsUpdate = true;
-}
-
-function Traffic({ sim }: { sim: Sim }) {
-  const cars = sim.veh.filter((v) => v.kind === 0), buses = sim.veh.filter((v) => v.kind === 1), trams = sim.veh.filter((v) => v.kind === 2);
-  const car = useRef<THREE.InstancedMesh>(null), cab = useRef<THREE.InstancedMesh>(null), bus = useRef<THREE.InstancedMesh>(null), tram = useRef<THREE.InstancedMesh>(null), ped = useRef<THREE.InstancedMesh>(null);
-  useLayoutEffect(() => {
-    paintOnce(car.current, cars.map((_, i) => CAR_COLORS[i % CAR_COLORS.length]));
-    paintOnce(cab.current, cars.map(() => '#2b3440'));
-    paintOnce(bus.current, buses.map(() => '#f1eee4'));
-    paintOnce(tram.current, trams.map((_, i) => (i % 2 ? '#2f6fb3' : '#3b82c4')));
-    paintOnce(ped.current, sim.peds.map((_, i) => ['#b3262e', '#2f6fb3', '#e0b23a', '#4f8a45', '#3b3f4a', '#d9d4c7'][i % 6]));
-  }, [sim]);
-  useFrame(() => {
-    sync(car.current, cars, cars.length, 0.95); sync(cab.current, cars, cars.length, 1.75, -0.3);
-    sync(bus.current, buses, buses.length, 1.9); sync(tram.current, trams, trams.length, 2.1);
-    sync(ped.current, sim.peds, Math.min(MAX_PEDS, Math.round(sim.activePeds)), 0.9);
-  });
-  const mats = <meshStandardMaterial />;
-  return (
-    <>
-      <instancedMesh ref={car} args={[undefined, undefined, cars.length]} frustumCulled={false}><boxGeometry args={[4.2, 1.5, 2]} />{mats}</instancedMesh>
-      <instancedMesh ref={cab} args={[undefined, undefined, cars.length]} frustumCulled={false}><boxGeometry args={[2.2, 0.9, 1.7]} />{mats}</instancedMesh>
-      <instancedMesh ref={bus} args={[undefined, undefined, buses.length]} frustumCulled={false}><boxGeometry args={[10, 3, 2.6]} />{mats}</instancedMesh>
-      <instancedMesh ref={tram} args={[undefined, undefined, trams.length]} frustumCulled={false}><boxGeometry args={[22, 3.2, 2.6]} />{mats}</instancedMesh>
-      <instancedMesh ref={ped} args={[undefined, undefined, MAX_PEDS]} frustumCulled={false}><cylinderGeometry args={[0.35, 0.35, 1.8, 6]} />{mats}</instancedMesh>
-    </>
-  );
-}
-
-function Trees({ sim, ver }: { sim: Sim; ver: number }) {
-  const ref = useRef<THREE.InstancedMesh>(null);
-  const base = useMemo(() => genTrees(sim.edges), [sim]);
-  useLayoutEffect(() => {
-    const all = [...base, ...sim.parks.flatMap((p, i) => parkTrees(i, p.x, p.z, p.r))], d = new THREE.Object3D(), c = new THREE.Color(), m = ref.current!;
-    all.forEach((t, i) => { d.position.set(t.x, 4.2 * t.s, t.z); d.scale.set(t.s, t.s, t.s); d.updateMatrix(); m.setMatrixAt(i, d.matrix); m.setColorAt(i, c.set(t.c)); });
-    m.count = all.length; m.instanceMatrix.needsUpdate = true; m.instanceColor!.needsUpdate = true;
-  }, [base, ver, sim]);
-  return <instancedMesh ref={ref} args={[undefined, undefined, 900]} frustumCulled={false} castShadow><coneGeometry args={[3.2, 8.4, 6]} /><meshStandardMaterial /></instancedMesh>;
-}
-
-function Markers({ sim, ver }: { sim: Sim; ver: number }) {
+/** Etykiety miejsc i przystanków – warstwa „mapy”. */
+function Labels({ city, ver }: { city: CityData; ver: number }) {
+  const pois = useMemo(() => (city.pois ?? []).slice(0, 180), [city.pois]);
   void ver;
   return (
     <group>
-      {sim.parks.map((p, i) => <mesh key={'p' + i} position={[p.x, 0.25, p.z]} rotation-x={-Math.PI / 2}><circleGeometry args={[p.r, 28]} /><meshStandardMaterial color="#6aa84f" /></mesh>)}
-      {sim.edges.filter((e) => e.closed).flatMap((e) => [10, e.len - 10].map((t, k) => (
-        <mesh key={`c${e.id}-${k}`} position={[e.ax + e.hx * t, 1, e.az + e.hz * t]} rotation-y={Math.atan2(-e.hz, e.hx) + Math.PI / 2}><boxGeometry args={[10, 1.6, 0.7]} /><meshStandardMaterial color="#c8312b" /></mesh>
-      )))}
-      {sim.edges.filter((e) => e.hasStop).map((e) => (
-        <mesh key={'s' + e.id} position={[e.ax + e.hx * e.len / 2 - e.hz * 7.5, 2.6, e.az + e.hz * e.len / 2 + e.hx * 7.5]}><boxGeometry args={[1.2, 5.2, 1.2]} /><meshStandardMaterial color="#f2c230" /></mesh>
+      {pois.map((p, i) => (
+        <Html key={i} position={[p.x, 22, p.z]} center distanceFactor={1200} zIndexRange={[8, 0]} style={{ pointerEvents: 'none' }}>
+          <div className="lbl poi"><b>{p.name}</b><span>{p.category}</span></div>
+        </Html>
       ))}
     </group>
   );
 }
 
-export const CityScene = memo(function CityScene(p: Props) {
+/** Heatmapa ruchu pieszego – wartości z agentów symulacji. */
+function PedFlow({ sim, ver }: { sim: Sim; ver: number }) {
+  const ref = useRef<THREE.InstancedMesh>(null);
+  const D = useMemo(() => new THREE.Object3D(), []);
+  const C = useMemo(() => new THREE.Color(), []);
+  useLayoutEffectSafe(() => {
+    const m = ref.current;
+    if (!m) return;
+    let n = 0;
+    for (const r of sim.roads) {
+      const foot = Math.min(1, r.walkWeight / 16);
+      if (foot < 0.15) continue;
+      const e = r.edge;
+      D.position.set((e.ax + e.bx) / 2, 1.4, (e.az + e.bz) / 2);
+      D.rotation.set(0, Math.atan2(-e.hz, e.hx), 0);
+      D.scale.set(e.len, 0.05, 4);
+      D.updateMatrix();
+      m.setMatrixAt(n, D.matrix);
+      m.setColorAt(n, foot < 0.5 ? C.lerpColors(new THREE.Color('#2b4a7a'), new THREE.Color('#d8a53a'), foot / 0.5)
+        : C.lerpColors(new THREE.Color('#d8a53a'), new THREE.Color('#e0453a'), (foot - 0.5) / 0.5));
+      n++;
+      if (n >= 4000) break;
+    }
+    m.count = n;
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+  }, [sim, ver]);
   return (
-    <Canvas shadows dpr={[1, 1.75]} camera={{ fov: 45, near: 1, far: 4000, position: [420, 330, 540] }}>
+    <instancedMesh ref={ref} args={[undefined, undefined, 4000]} frustumCulled={false}>
+      <boxGeometry args={[1, 1, 1]} />
+      <meshBasicMaterial transparent opacity={0.45} toneMapped={false} depthWrite={false} />
+    </instancedMesh>
+  );
+}
+import { useLayoutEffect } from 'react';
+function useLayoutEffectSafe(fn: () => void, deps: unknown[]) {
+  useLayoutEffect(fn, deps);
+}
+
+export const CityScene = memo(function CityScene(p: CitySceneProps) {
+  const { sim, city } = p;
+  const field = useMemo(() => (city.terrain?.heights?.length ? new HeightField(city.terrain) : null), [city.terrain]);
+  setHeightField(field);
+  const extent = useMemo(() => areaExtent(city.area), [city.area]);
+  const focus = useMemo<[number, number]>(() => [0, Math.min(200, extent.halfZ * 0.22)], [extent]);
+  const hiddenKey = useMemo(() => sim.parks.map((x) => `${Math.round(x.x)}:${Math.round(x.z)}`).join('|'), [sim.parks, p.ver]);
+
+  return (
+    <Canvas shadows dpr={[1, 1.4]} camera={{ fov: 45, near: 1, far: 6000, position: [focus[0] + 900, 620, focus[1] + 1100] }}>
       <color attach="background" args={['#cfe0ec']} />
-      <fog attach="fog" args={['#cfe0ec', 700, 2200]} />
-      <hemisphereLight args={['#ffffff', '#8a8570', 1.0]} />
-      <directionalLight position={[300, 500, 200]} intensity={1.7} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-640} shadow-camera-right={640} shadow-camera-top={640} shadow-camera-bottom={-640} shadow-camera-near={1} shadow-camera-far={1600} />
-      <Driver sim={p.sim} speed={p.speed} paused={p.paused} />
-      <Rig />
-      <Ground tool={p.tool} onSelect={p.onSelect} onPark={p.onPark} />
-      <Buildings sim={p.sim} ver={p.ver} buildings={p.buildings} tool={p.tool} onSelect={p.onSelect} onPark={p.onPark} />
-      <Roads sim={p.sim} ver={p.ver} sel={p.sel} tool={p.tool} onSelect={p.onSelect} onPark={p.onPark} />
-      <Trees sim={p.sim} ver={p.ver} />
-      <Markers sim={p.sim} ver={p.ver} />
-      <Traffic sim={p.sim} />
+      <fog attach="fog" args={['#cfe0ec', 1400, 5200]} />
+      <hemisphereLight args={['#ffffff', '#7d7a68', 0.95]} />
+      <directionalLight position={[280, 700, 240]} intensity={1.5} castShadow
+        shadow-mapSize={[1536, 1536]} shadow-camera-left={-900} shadow-camera-right={900}
+        shadow-camera-top={900} shadow-camera-bottom={-900} shadow-camera-near={1} shadow-camera-far={3000} />
+      <Driver sim={sim} speed={p.speed} paused={p.paused} />
+      <Rig focus={focus} flyTo={p.flyTo} />
+      {p.layers.has('base') && (
+        <Terrain polygons={city.polygons} area={city.area} terrain={city.terrain}
+          onGround={p.onGround} onClear={() => p.onSelect(null)} />
+      )}
+      {p.layers.has('greens') && <Trees polygons={city.polygons} ver={p.ver} />}
+      {p.layers.has('buildings') && (
+        <Buildings buildings={city.buildings} hiddenKey={hiddenKey} ver={p.ver}
+          onSelect={(i) => p.onSelect({ kind: 'building', id: i })} />
+      )}
+      <RoadNetwork sim={sim} ver={p.ver} sel={p.sel?.kind === 'road' ? p.sel.id : null}
+        view={p.trafficView} layers={p.layers} onSelect={(id) => p.onSelect({ kind: 'road', id })} />
+      {p.layers.has('transit') && <TransitStops stops={city.stops} ver={p.ver} />}
+      <PlayerParks parks={sim.parks} ver={p.ver} />
+      <PlayerStructures sim={sim} ver={p.ver} />
+      {p.layers.has('disasters') && <DisasterLayer sim={sim} ver={p.ver} />}
+      <Closures sim={sim} ver={p.ver} />
+      <RealFleet sim={sim} onPick={p.onPickVehicle} selected={p.selectedVehicle} layers={p.layers} />
+      <SimFleet sim={sim} layers={p.layers} />
+      {p.layers.has('pedestrians') && <PedestrianFleet peds={sim.peds} active={Math.round(sim.activePeds)} />}
+      {p.layers.has('pedflow') && <PedFlow sim={sim} ver={p.ver} />}
+      {p.layers.has('labels') && <Labels city={city} ver={p.ver} />}
+      <Ghost kind={p.placeKind} roadFrom={p.roadFrom} onCommit={p.onCommit} />
     </Canvas>
   );
 });
+
+/** Realne pojazdy MPK z GTFS-RT – pozycja prosto z feedu. */
+function RealFleet({ sim, onPick, selected, layers }: {
+  sim: Sim; onPick: CitySceneProps['onPickVehicle']; selected: string | null; layers: Set<string>;
+}) {
+  const trams = useMemo<FleetPose[]>(() => [], []);
+  const buses = useMemo<FleetPose[]>(() => [], []);
+  const get = useMemo(() => ({ trams: () => trams, buses: () => buses }), []);
+  const prev = useRef(new Map<string, { x: number; z: number; yaw: number }>());
+  const show = layers.has('live') || layers.has('transit');
+  const key = useRef('');
+  useFrame((_, dt) => {
+    const src = show ? sim.realVehicles : [];
+    const k = src.length + '|' + (src[0]?.id ?? '') + '|' + (src[0]?.timestamp ?? '');
+    const fresh = k !== key.current;
+    key.current = k;
+    const f = fresh ? 0.55 : Math.min(1, dt * 1.6);
+    trams.length = 0; buses.length = 0;
+    for (const v of src) {
+      const yaw = ((v.bearing ?? 0) * Math.PI) / 180;
+      const p = prev.current.get(v.id);
+      if (p) {
+        let dy = yaw - p.yaw;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        p.x += (v.x - p.x) * f; p.z += (v.z - p.z) * f; p.yaw += dy * f;
+      } else prev.current.set(v.id, { x: v.x, z: v.z, yaw });
+      const s = prev.current.get(v.id)!;
+      const pose = { id: v.id, x: s.x, z: s.z, yaw: s.yaw, ref: v.line, observed: true };
+      if (v.type === 'tram') trams.push(pose); else buses.push(pose);
+    }
+  });
+  return (
+    <group>
+      <TramFleet get={get.trams} onPick={(i) => onPick(trams[i]?.id ?? '', 'tram')} selected={selected} />
+      <BusFleet get={get.buses} onPick={(i) => onPick(buses[i]?.id ?? '', 'bus')} />
+      <ObservedMarkers get={get.trams} />
+      <ObservedMarkers get={get.buses} />
+    </group>
+  );
+}
+
+/**
+ * Pojazdy symulacji – MPK na realnych trasach GTFS + auta.
+ * Pozycje czytamy co klatkę: agentów nie ma w reakcie, więc nie wystarczy
+ * przeliczyć je raz przy montowaniu (pojazdy stałyby w miejscu).
+ */
+function SimFleet({ sim, layers }: { sim: Sim; layers: Set<string> }) {
+  const trams = useMemo<FleetPose[]>(() => [], []);
+  const buses = useMemo<FleetPose[]>(() => [], []);
+  const cars = useMemo<FleetPose[]>(() => [], []);
+  useFrame(() => {
+    for (const v of sim.veh) {
+      const p: FleetPose = {
+        id: `${v.kind}-${v.edge}-${Math.round(v.x)}-${Math.round(v.z)}`,
+        x: v.x, z: v.z, yaw: v.yaw, ref: v.ref,
+      };
+      if (v.kind === 2) trams.push(p);
+      else if (v.kind === 1) buses.push(p);
+      else cars.push(p);
+    }
+  });
+  return (
+    <group>
+      {layers.has('transit') && (
+        <>
+          <TramFleet get={() => trams} />
+          <BusFleet get={() => buses} />
+        </>
+      )}
+      {layers.has('traffic') && <CarFleet get={() => cars} />}
+    </group>
+  );
+}
