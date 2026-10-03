@@ -102,19 +102,39 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
       if (!err) setTool('select');
       return;
     }
+    if (tool === 'tram-track') {
+      if (!roadFrom) { setRoadFrom({ x, z }); setMsg((m) => ({ id: m.id + 1, text: 'Kliknij drugi koniec torowiska.' })); return; }
+      const err = act(() => sim.addTramTrack(roadFrom.x, roadFrom.z, x2, z2), 'Dodano torowisko tramwajowe.');
+      setRoadFrom(null);
+      if (!err) setTool('select');
+      return;
+    }
     if (tool === 'mall' || tool === 'university') {
       const err = act(() => sim.addStructure(tool, x, z), tool === 'mall' ? 'Wybudowano centrum handlowe.' : 'Wybudowano uczelnię.');
       if (!err) setTool('select');
       return;
     }
     if (tool === 'park') {
-      if (!act(() => sim.addPark(x, z), 'Posadzono park.')) setTool('select');
+      if (!act(() => sim.addPark(x, z, 'circle'), 'Posadzono park (koło).')) setTool('select');
+      return;
+    }
+    if (tool === 'park-rect') {
+      if (!roadFrom) { setRoadFrom({ x, z }); setMsg((m) => ({ id: m.id + 1, text: 'Kliknij przeciwległy róg prostokątnego parku.' })); return; }
+      const w = Math.abs(x2 - roadFrom.x) || 40;
+      const d = Math.abs(z2 - roadFrom.z) || 28;
+      const cx = (roadFrom.x + x2) / 2, cz = (roadFrom.z + z2) / 2;
+      const err = act(() => sim.addPark(cx, cz, 'rect', Math.max(24, w), Math.max(20, d)), 'Posadzono park (prostokąt).');
+      setRoadFrom(null);
+      if (!err) setTool('select');
       return;
     }
     if (tool === 'stop-bus' || tool === 'stop-tram') {
-      const rid = nearestRoadId(sim, x, z);
-      if (rid < 0) { setMsg((m) => ({ id: m.id + 1, text: 'Kliknij bliżej ulicy, aby postawić przystanek.' })); return; }
       const mode = tool === 'stop-tram' ? 'tram' : 'bus';
+      const rid = nearestRoadId(sim, x, z, mode === 'tram');
+      if (rid < 0) {
+        setMsg((m) => ({ id: m.id + 1, text: mode === 'tram' ? 'Kliknij bliżej torowiska.' : 'Kliknij bliżej ulicy.' }));
+        return;
+      }
       const err = act(() => sim.addStopAt(rid, mode), mode === 'tram' ? 'Postawiono przystanek tramwajowy.' : 'Postawiono przystanek autobusowy.');
       if (!err) setTool('select');
       return;
@@ -176,7 +196,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         goto={goto}
         layers={layers}
         toggleLayer={toggleLayer}
-        setTool={setTool}
+        setTool={(t) => { setTool(t); setRoadFrom(null); }}
         topDown={topDown}
         setTopDown={setTopDown}
         setPaused={setPaused}
@@ -193,15 +213,16 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   );
 }
 
-function nearestRoadId(sim: SimEngine, x: number, z: number): number {
+function nearestRoadId(sim: SimEngine, x: number, z: number, preferTram = false): number {
   let best = -1, bd = Infinity;
   for (const r of sim.roads) {
     const e = r.edge;
+    if (preferTram && e.roadClass !== 'tram' && !e.hasTram) continue;
     const t = Math.max(0, Math.min(1, ((x - e.ax) * e.hx + (z - e.az) * e.hz) / e.len));
     const d = Math.hypot(x - (e.ax + e.hx * e.len * t), z - (e.az + e.hz * e.len * t));
     if (d < bd) { bd = d; best = e.id; }
   }
-  return bd < 45 ? best : -1;
+  return bd < (preferTram ? 55 : 45) ? best : -1;
 }
 
 export interface PlaceRef { kind: 'road' | 'building'; id: number }

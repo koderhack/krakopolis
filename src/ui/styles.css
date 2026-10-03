@@ -64,7 +64,37 @@ canvas { display: block; touch-action: none; }
 .bar { display: block; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; margin-top: 3px; }
 .bar i { display: block; height: 100%; border-radius: 2px; transition: width 0.3s ease; }
 
-.ctrl { display: flex; gap: 4px; }
+.ctrl { display: flex; gap: 4px; align-items: center; }
+
+.sim-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-right: 8px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--line);
+  min-width: 88px;
+  line-height: 1.15;
+}
+.sim-clock-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.sim-clock-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+}
+.sim-clock-meta {
+  font-size: 10px;
+  color: var(--live);
+}
 
 button {
   font: inherit; color: var(--text);
@@ -78,17 +108,61 @@ button:disabled { opacity: 0.35; cursor: default; }
 button small { color: var(--muted); font-size: 10px; }
 
 /* -------------------------------------------------------------- data panel */
-/* Lewa kolumna: panele ustawiane w stosie, żeby nigdy na siebie nie nachodziły
-   (wcześniej „Warstwy" nakładały się na panel „co to za ulica"). */
-.col.left {
-  position: absolute; top: 74px; left: 14px; width: 306px;
+/* Lewa / prawa kolumna: stos paneli + chevron do zwijania. */
+.col.left, .col.right {
+  position: absolute; top: 74px;
+  display: flex; align-items: flex-start; gap: 0;
+  max-height: calc(100vh - 168px);
+  z-index: 18;
+  transition: transform 0.22s ease;
+  pointer-events: none;
+}
+.col.left { left: 14px; flex-direction: row; }
+.col.right { right: 14px; flex-direction: row-reverse; }
+.col .side-stack {
+  width: 306px;
   display: flex; flex-direction: column; gap: 10px;
   max-height: calc(100vh - 168px); overflow-y: auto; overflow-x: hidden;
-  z-index: 18; scrollbar-width: thin;
+  scrollbar-width: thin;
+  pointer-events: auto;
+  transition: opacity 0.18s ease, transform 0.22s ease;
 }
-.col.left > * { position: relative; top: auto; left: auto; width: 100%; flex: none; }
+.col.right .side-stack { width: 300px; }
+.col.left.collapsed { transform: translateX(calc(-100% + 28px)); }
+.col.right.collapsed { transform: translateX(calc(100% - 28px)); }
+.col.collapsed .side-stack {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.98);
+}
+.col .side-stack > * { position: relative !important; top: auto !important; left: auto !important; right: auto !important; bottom: auto !important; width: 100% !important; flex: none; }
+
+.side-toggle {
+  pointer-events: auto;
+  flex: none;
+  width: 26px; height: 56px;
+  margin-top: 8px;
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; line-height: 1;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.side-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: #4b8ede;
+}
+.col.left .side-toggle { margin-left: 6px; }
+.col.right .side-toggle { margin-right: 6px; }
+
 .datapanel {
-  position: absolute; top: 74px; left: 14px; width: 306px;
+  position: relative; width: 100%;
   background: var(--panel); backdrop-filter: blur(10px);
   border: 1px solid var(--line); border-radius: 10px;
   overflow: hidden; z-index: 18;
@@ -125,15 +199,12 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
 
 /* ------------------------------------------------------------ side panels */
 .panel, .envcard, .changes {
-  position: absolute; right: 14px; width: 306px;
+  position: relative; width: 100%;
   background: var(--panel); backdrop-filter: blur(10px);
   border: 1px solid var(--line); border-radius: 10px;
   padding: 12px 14px; z-index: 18;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
-.panel { top: 74px; }
-.envcard { top: 460px; }
-.changes { top: 300px; right: 330px; left: auto; }
 
 .panel h2, .envcard h3, .changes h3 { margin: 0 0 2px; font-size: 13px; letter-spacing: 0.2px; }
 .envcard h3 small, .changes h3 small { color: var(--muted); font-weight: 400; font-size: 10px; margin-left: 6px; }
@@ -196,8 +267,12 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
 .foot .obs { color: var(--obs); font-weight: 700; letter-spacing: 0.5px; }
 
 @media (max-width: 1200px) {
-  .changes { display: none; }
-  .envcard { top: auto; bottom: 110px; }
+  .col.left .side-stack, .col.right .side-stack { width: 270px; }
+  .search { width: min(360px, calc(100vw - 120px)); }
+}
+@media (max-width: 820px) {
+  .col.left, .col.right { top: 120px; max-height: calc(100vh - 220px); }
+  .col.left .side-stack, .col.right .side-stack { width: min(260px, 72vw); }
 }
 /* ----------------------------------------------------------- wyszukiwarka */
 .search {
@@ -232,13 +307,7 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
 .search li.none:hover { background: transparent; }
 
 /* ------------------------------------------------------- panel pojazdu */
-.panel.vehicle { top: 74px; right: 330px; }
-.panel.vehicle h2 { font-size: 20px; letter-spacing: 0.5px; }
-
-@media (max-width: 1400px) {
-  .panel.vehicle { right: 14px; top: 300px; }
-  .search { width: min(440px, calc(100vw - 700px)); }
-}
+.panel.vehicle { position: relative; width: 100%; top: auto; right: auto; }
 
 /* --------------------------------------------------------- panel warstw */
 .layers {
@@ -261,10 +330,17 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
 }
 .layers button.on .dot { background: var(--live); box-shadow: 0 0 6px var(--live); }
 .layers button.on .dot.obs { background: var(--obs); box-shadow: 0 0 6px var(--obs); }
+.layers .layer-attr {
+  margin: 8px 2px 2px;
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: var(--muted);
+  opacity: 0.85;
+}
 
 /* ----------------------------------------------------- lista zrobionego */
 .done {
-  position: absolute; top: 74px; right: 14px; width: 220px;
+  position: relative; width: 100%;
   background: var(--panel); backdrop-filter: blur(10px);
   border: 1px solid var(--line); border-radius: 10px;
   overflow: hidden; z-index: 18;

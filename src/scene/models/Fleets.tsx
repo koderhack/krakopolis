@@ -261,17 +261,22 @@ function Ring({ get, match, color }: { get: () => FleetPose[]; match: string; co
 /** Zielony pierścień pod realnym pojazdem = oznaczenie danych OBSERVED. */
 export function ObservedMarkers({ get, capacity = 260 }: { get: () => FleetPose[]; capacity?: number }) {
   const ref = useRef<THREE.InstancedMesh>(null);
-  useFrame(() => {
+  const acc = useRef(0);
+  useFrame((_, dt) => {
+    acc.current += dt;
+    if (acc.current < 0.08) return; // ~12 Hz – wystarczy do pierścieni
+    acc.current = 0;
     const m = ref.current;
     if (!m) return;
     const list = get();
-    list.forEach((p, i) => put(m, i, p.x, 0.42, p.z, p.yaw));
-    m.count = list.length;
+    const n = Math.min(list.length, capacity);
+    for (let i = 0; i < n; i++) put(m, i, list[i].x, 0.42, list[i].z, list[i].yaw);
+    m.count = n;
     m.instanceMatrix.needsUpdate = true;
   });
   return (
     <instancedMesh ref={ref} args={[undefined, undefined, capacity]} frustumCulled={false}>
-      <ringGeometry args={[1.35, 1.75, 22]} />
+      <ringGeometry args={[1.35, 1.75, 16]} />
       <meshBasicMaterial color="#3ee08a" toneMapped={false} transparent opacity={0.85} side={THREE.DoubleSide} />
     </instancedMesh>
   );

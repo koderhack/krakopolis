@@ -4,7 +4,7 @@ export type TrafficView = 'simulated' | 'baseline' | 'predicted';
 
 export type Sel = { kind: 'road'; id: number } | { kind: 'building'; id: number } | null;
 
-export type Tool = 'select' | 'park' | 'stop-bus' | 'stop-tram' | 'mall' | 'university' | 'road' | 'disaster';
+export type Tool = 'select' | 'park' | 'park-rect' | 'stop-bus' | 'stop-tram' | 'mall' | 'university' | 'road' | 'tram-track' | 'disaster';
 
 /** Rodzaj obiektu stawianego w terenie (niebieski podgląd). */
 export type PlaceKind = Exclude<Tool, 'select' | 'disaster'>;

@@ -45,8 +45,84 @@ export interface CitySceneProps {
 }
 
 function Driver({ sim, speed, paused }: { sim: Sim; speed: number; paused: boolean }) {
-  useFrame((_, d) => { if (!paused) sim.advance(Math.min(d, 0.12) * speed); });
+  useFrame((_, d) => {
+    if (paused) return;
+    const dt = Math.min(d, 0.12);
+    if (speed <= 1) {
+      // 1× = rzeczywisty czas Europe/Warsaw
+      sim.syncClockToWall();
+      sim.advance(dt);
+    } else {
+      sim.advanceClock(dt * speed);
+      sim.advance(dt * speed);
+    }
+  });
   return null;
+}
+
+/** Oświetlenie i mgła zależne od godziny symulacji (dzień/noc). */
+function DayNight({ sim }: { sim: Sim }) {
+  const hemi = useRef<THREE.HemisphereLight>(null);
+  const sun = useRef<THREE.DirectionalLight>(null);
+  const sky = useRef(new THREE.Color('#cfe0ec'));
+  const dawn = useRef(new THREE.Color('#f0c080'));
+  const dusk = useRef(new THREE.Color('#e09060'));
+  const nightSky = useRef(new THREE.Color('#0a1020'));
+  const { scene } = useThree();
+
+  useFrame(() => {
+    const day = sim.dayFactor();
+    const { hour, minute } = sim.clockParts();
+    const t = hour + minute / 60;
+    const elev = Math.max(0.05, Math.sin(((t - 5.5) / 14) * Math.PI));
+    const az = ((t - 12) / 12) * Math.PI * 0.85;
+
+    const c = sky.current.setRGB(
+      0.12 + day * 0.69,
+      0.14 + day * 0.74,
+      0.22 + day * 0.70,
+    );
+    if (t > 5.5 && t < 7.5) c.lerp(dawn.current, (1 - Math.abs(t - 6.5)) * 0.35);
+    if (t > 18 && t < 20.5) c.lerp(dusk.current, (1 - Math.abs(t - 19.2) / 1.3) * 0.4);
+    if (t >= 21 || t < 5) c.copy(nightSky.current);
+
+    scene.background = c;
+    if (scene.fog instanceof THREE.Fog) {
+      scene.fog.color.copy(c);
+      scene.fog.near = 900 + day * 500;
+      scene.fog.far = 3800 + day * 1600;
+    }
+
+    if (hemi.current) {
+      hemi.current.color.set(day > 0.4 ? '#ffffff' : '#6a7a9a');
+      hemi.current.groundColor.set(day > 0.35 ? '#7d7a68' : '#1a1820');
+      hemi.current.intensity = 0.25 + day * 0.75;
+    }
+    if (sun.current) {
+      sun.current.position.set(Math.sin(az) * 520, 120 + elev * 680, Math.cos(az) * 420);
+      sun.current.intensity = 0.15 + day * 1.45;
+      sun.current.color.set(day > 0.55 ? '#fff5e6' : day > 0.25 ? '#ffb070' : '#8899cc');
+    }
+  });
+
+  return (
+    <>
+      <hemisphereLight ref={hemi} args={['#ffffff', '#7d7a68', 0.95]} />
+      <directionalLight
+        ref={sun}
+        position={[280, 700, 240]}
+        intensity={1.5}
+        castShadow
+        shadow-mapSize={[1024, 1024]}
+        shadow-camera-left={-700}
+        shadow-camera-right={700}
+        shadow-camera-top={700}
+        shadow-camera-bottom={-700}
+        shadow-camera-near={1}
+        shadow-camera-far={2600}
+      />
+    </>
+  );
 }
 
 /**
@@ -322,17 +398,15 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
     <Canvas shadows dpr={[1, 1.25]} camera={{ fov: 45, near: 1, far: 6000, position: [focus[0] + 900, 620, focus[1] + 1100] }}>
       <color attach="background" args={['#cfe0ec']} />
       <fog attach="fog" args={['#cfe0ec', 1400, 5200]} />
-      <hemisphereLight args={['#ffffff', '#7d7a68', 0.95]} />
-      <directionalLight position={[280, 700, 240]} intensity={1.5} castShadow
-        shadow-mapSize={[1024, 1024]} shadow-camera-left={-700} shadow-camera-right={700}
-        shadow-camera-top={700} shadow-camera-bottom={-700} shadow-camera-near={1} shadow-camera-far={2600} />
+      <DayNight sim={sim} />
       <Driver sim={sim} speed={p.speed} paused={p.paused} />
       <Rig focus={focus} flyTo={p.flyTo} topDown={p.topDown} onBounds={p.onBounds} />
       {p.layers.has('base') && (
         <Terrain key={`terrain-${staticKey}`} polygons={city.polygons} area={city.area} terrain={city.terrain}
+          showBasemap={p.layers.has('basemap')}
           onGround={p.onGround} onClear={() => p.onSelect(null)} />
       )}
-      {p.layers.has('greens') && <Trees key={`trees-${staticKey}`} polygons={city.polygons} ver={p.ver} />}
+      {p.layers.has('trees') && <Trees key={`trees-${staticKey}`} polygons={city.polygons} ver={p.ver} />}
       {p.layers.has('buildings') && (
         <Buildings key={`bld-${staticKey}-${hiddenKey}`} buildings={city.buildings} hiddenKey={hiddenKey} ver={p.ver}
           onSelect={(i) => p.onSelect({ kind: 'building', id: i })} />
@@ -397,17 +471,24 @@ function RealFleet({ sim, onPick, selected, layers }: {
 
 /**
  * Pojazdy symulacji – MPK na realnych trasach GTFS + auta.
- * Pozycje czytamy co klatkę: agentów nie ma w reakcie, więc nie wystarczy
- * przeliczyć je raz przy montowaniu (pojazdy stałyby w miejscu).
+ * Tablice reuse'ujemy i zerujemy co klatkę (wcześniej rosły w nieskończoność).
  */
 function SimFleet({ sim, layers }: { sim: Sim; layers: Set<string> }) {
   const trams = useMemo<FleetPose[]>(() => [], []);
   const buses = useMemo<FleetPose[]>(() => [], []);
   const cars = useMemo<FleetPose[]>(() => [], []);
+  const get = useMemo(() => ({
+    trams: () => trams,
+    buses: () => buses,
+    cars: () => cars,
+  }), [trams, buses, cars]);
   useFrame(() => {
+    trams.length = 0;
+    buses.length = 0;
+    cars.length = 0;
     for (const v of sim.veh) {
       const p: FleetPose = {
-        id: `${v.kind}-${v.edge}-${Math.round(v.x)}-${Math.round(v.z)}`,
+        id: `${v.kind}-${v.edge}`,
         x: v.x, z: v.z, yaw: v.yaw, ref: v.ref,
       };
       if (v.kind === 2) trams.push(p);
@@ -419,11 +500,11 @@ function SimFleet({ sim, layers }: { sim: Sim; layers: Set<string> }) {
     <group>
       {layers.has('transit') && (
         <>
-          <TramFleet get={() => trams} />
-          <BusFleet get={() => buses} />
+          <TramFleet get={get.trams} />
+          <BusFleet get={get.buses} />
         </>
       )}
-      {layers.has('traffic') && <CarFleet get={() => cars} />}
+      {layers.has('traffic') && <CarFleet get={get.cars} />}
     </group>
   );
 }

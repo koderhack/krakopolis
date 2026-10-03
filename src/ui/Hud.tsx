@@ -7,6 +7,7 @@ import { DISASTERS, type DisasterKind } from '../simulation/city/player';
 import type { PipelineSnapshot } from '../data/pipeline';
 import { formatAge } from '../data/cache/store';
 import type { Origin } from '../data/types';
+import { formatCoords } from '../data/adapters/cityAdapter';
 import { buildIndex, search, KIND_LABEL, type Place } from '../scene/search';
 import type { PlaceRef } from '../scene/types';
 
@@ -171,6 +172,9 @@ function LayersPanel({ layers, toggle }: { layers: Set<string>; toggle: (id: str
           {l.label}
         </button>
       ))}
+      {layers.has('basemap') && (
+        <p className="layer-attr">Podkład: Esri World Imagery · © Esri, Maxar</p>
+      )}
     </aside>
   );
 }
@@ -313,6 +317,8 @@ export function Hud({
 }: Props) {
   const [s, setS] = useState(() => sim.snapshot());
   const [toast, setToast] = useState('');
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
 
   useEffect(() => {
     const t = setInterval(() => setS(sim.snapshot()), 400);
@@ -369,6 +375,11 @@ export function Hud({
           <div className="metric"><span>Budżet</span><strong>{Math.round(s.budget).toLocaleString('pl-PL')} zł</strong></div>
         </div>
         <div className="ctrl">
+          <div className="sim-clock" title={s.weekend ? 'Weekend · Europe/Warsaw' : 'Dzień roboczy · Europe/Warsaw'}>
+            <span className="sim-clock-label">Czas</span>
+            <strong className="sim-clock-time">{s.clock}</strong>
+            <span className="sim-clock-meta">{speed === 1 && !paused ? 'na żywo' : paused ? 'pauza' : `${speed}×`}</span>
+          </div>
           <button className={paused ? '' : 'on'} onClick={() => setPaused(!paused)}>{paused ? 'Play' : 'Pauza'}</button>
           {[1, 2, 5].map((n) => <button key={n} className={speed === n ? 'on' : ''} onClick={() => setSpeed(n)}>{n}×</button>)}
           <button className={topDown ? 'on' : ''} onClick={() => setTopDown(!topDown)} title="Perspektywa: z góry albo poziomo z ulicy">Perspektywa</button>
@@ -380,71 +391,94 @@ export function Hud({
 
       <SearchBox city={city} goto={goto} />
 
-      <div className="col left">
-        <DataPanel pipe={pipe} city={city} />
-        <LayersPanel layers={layers} toggle={toggleLayer} />
+      <div className={`col left${leftCollapsed ? ' collapsed' : ''}`}>
+        <button
+          type="button"
+          className="side-toggle left-toggle"
+          aria-label={leftCollapsed ? 'Rozwiń panel danych' : 'Zwiń panel danych'}
+          title={leftCollapsed ? 'Rozwiń panel' : 'Zwiń panel'}
+          onClick={() => setLeftCollapsed((v) => !v)}
+        >
+          {leftCollapsed ? '›' : '‹'}
+        </button>
+        <div className="side-stack">
+          <DataPanel pipe={pipe} city={city} />
+          <LayersPanel layers={layers} toggle={toggleLayer} />
+        </div>
       </div>
 
-      {r && (
-        <aside className="panel">
-          <h2>{r.edge.name || 'Odcinek bez nazwy'}</h2>
-          <p className="sub">
-            {r.edge.roadClass} · {Math.round(r.edge.len)} m · {r.edge.carAccess ? `drogi ${r.edge.roadClass}` : 'chodnik / torowisko'}
-          </p>
-          <dl>
-            <dt title={ORIGIN_TITLE[r.baselineOrigin]}>DANE ŹRÓDŁOWE</dt>
-            <dd>
-              <span className={`tag ${r.baselineOrigin.toLowerCase()}`}>{r.baselineOrigin}</span>
-              <Bar v={r.baseline * 100} /> {pct(r.baseline)}
-            </dd>
-            <dt title="Wynik przypisania ruchu po zmianach gracza">PREDYKCJA SYMULACJI</dt>
-            <dd>
-              <Bar v={r.predicted * 100} /> {pct(r.predicted)}
-            </dd>
-            <dt>Prędkość</dt>
-            <dd>{r.baselineSpeed ? `${(r.baselineSpeed * 3.6).toFixed(0)} km/h` : '—'}</dd>
-            <dt>Przepustowość</dt>
-            <dd>{r.capacity > 0 ? `${r.capacity} poj./15 min (${r.edge.lanesForward} pas.)` : 'Data unavailable'}</dd>
-            <dt>Komunikacja</dt>
-            <dd>{r.transit ? 'tak – trasa z GTFS' : 'nie'}{r.realStop ? ' · przystanek' : ''}</dd>
-            <dt>Status</dt>
-            <dd className={r.closed ? 'bad' : ''}>{status}</dd>
-          </dl>
-          <div className="acts">
-            {acts.map((a) => <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {a.cost} zł</small> : null}</button>)}
-          </div>
-          <p className="note">Wartości „DANE ŹRÓDŁOWE” pochodzą z OSM/ZTP i nie zmieniają się przez grę.</p>
-        </aside>
-      )}
-
-      {b && (
-        <aside className="panel">
-          <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynk z OSM')}</h2>
-          <p className="sub">Obrys z OpenStreetMap · wysokość z tagów OSM</p>
-          <dl>
-            <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m</dd>
-            <dt>Obrys</dt><dd>{b.w.toFixed(0)} × {b.d.toFixed(0)} m</dd>
-            <dt>Kolor</dt><dd><span className="swatch" style={{ background: b.color }} /> {b.color} · dach {b.roof}</dd>
-          </dl>
-          <p className="note">Jeśli brak tagu <code>height</code> / <code>building:levels</code>, przyjęto wartość domyślną dla typu budynku.</p>
-        </aside>
-      )}
-
-      <EnvironmentCard city={city} />
-
-      {changes.length > 0 && (
-        <aside className="changes">
-          <h3>Zmiany gracza <small>scenariusz</small></h3>
-          {changes.slice(0, 8).map((c, i) => (
-            <div key={i} className="chg">
-              <span>{c.roadId} · {c.name || 'bez nazwy'}</span>
-              <em>{CHANGE_LABEL[c.change]}</em>
-            </div>
-          ))}
-          {changes.length > 8 && <p className="dp-note">…i {changes.length - 8} więcej</p>}
-          <p className="dp-note">Konsekwencje są <b>symulowane</b>. Dane źródłowe pozostają bez zmian.</p>
-        </aside>
-      )}
+      <div className={`col right${rightCollapsed ? ' collapsed' : ''}`}>
+        <button
+          type="button"
+          className="side-toggle right-toggle"
+          aria-label={rightCollapsed ? 'Rozwiń panel szczegółów' : 'Zwiń panel szczegółów'}
+          title={rightCollapsed ? 'Rozwiń panel' : 'Zwiń panel'}
+          onClick={() => setRightCollapsed((v) => !v)}
+        >
+          {rightCollapsed ? '‹' : '›'}
+        </button>
+        <div className="side-stack">
+          <DonePanel sim={sim} />
+          {vehicle && <VehicleCard vehicle={vehicle} city={city} setVehicle={setVehicle} />}
+          {r && (
+            <aside className="panel">
+              <h2>{r.edge.name || formatCoords((r.edge.ax + r.edge.bx) / 2, (r.edge.az + r.edge.bz) / 2)}</h2>
+              <p className="sub">
+                {r.edge.roadClass} · {Math.round(r.edge.len)} m · {r.edge.carAccess ? `drogi ${r.edge.roadClass}` : 'chodnik / torowisko'}
+              </p>
+              <dl>
+                <dt title={ORIGIN_TITLE[r.baselineOrigin]}>DANE ŹRÓDŁOWE</dt>
+                <dd>
+                  <span className={`tag ${r.baselineOrigin.toLowerCase()}`}>{r.baselineOrigin}</span>
+                  <Bar v={r.baseline * 100} /> {pct(r.baseline)}
+                </dd>
+                <dt title="Wynik przypisania ruchu po zmianach gracza">PREDYKCJA SYMULACJI</dt>
+                <dd>
+                  <Bar v={r.predicted * 100} /> {pct(r.predicted)}
+                </dd>
+                <dt>Prędkość</dt>
+                <dd>{r.baselineSpeed ? `${(r.baselineSpeed * 3.6).toFixed(0)} km/h` : '—'}</dd>
+                <dt>Przepustowość</dt>
+                <dd>{r.capacity > 0 ? `${r.capacity} poj./15 min (${r.edge.lanesForward} pas.)` : 'Data unavailable'}</dd>
+                <dt>Komunikacja</dt>
+                <dd>{r.transit ? 'tak – trasa z GTFS' : 'nie'}{r.realStop ? ' · przystanek' : ''}</dd>
+                <dt>Status</dt>
+                <dd className={r.closed ? 'bad' : ''}>{status}</dd>
+              </dl>
+              <div className="acts">
+                {acts.map((a) => <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {a.cost} zł</small> : null}</button>)}
+              </div>
+              <p className="note">Wartości „DANE ŹRÓDŁOWE” pochodzą z OSM/ZTP i nie zmieniają się przez grę.</p>
+            </aside>
+          )}
+          {b && (
+            <aside className="panel">
+              <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynk z OSM')}</h2>
+              <p className="sub">Obrys z OpenStreetMap · wysokość z tagów OSM</p>
+              <dl>
+                <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m</dd>
+                <dt>Obrys</dt><dd>{b.w.toFixed(0)} × {b.d.toFixed(0)} m</dd>
+                <dt>Kolor</dt><dd><span className="swatch" style={{ background: b.color }} /> {b.color} · dach {b.roof}</dd>
+              </dl>
+              <p className="note">Jeśli brak tagu <code>height</code> / <code>building:levels</code>, przyjęto wartość domyślną dla typu budynku.</p>
+            </aside>
+          )}
+          <EnvironmentCard city={city} />
+          {changes.length > 0 && (
+            <aside className="changes">
+              <h3>Zmiany gracza <small>scenariusz</small></h3>
+              {changes.slice(0, 8).map((c, i) => (
+                <div key={i} className="chg">
+                  <span>{c.roadId} · {c.name || '—'}</span>
+                  <em>{CHANGE_LABEL[c.change]}</em>
+                </div>
+              ))}
+              {changes.length > 8 && <p className="dp-note">…i {changes.length - 8} więcej</p>}
+              <p className="dp-note">Konsekwencje są <b>symulowane</b>. Dane źródłowe pozostają bez zmian.</p>
+            </aside>
+          )}
+        </div>
+      </div>
 
       <nav className="tools">
         <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')}>Zaznacz</button>
@@ -461,14 +495,16 @@ export function Hud({
         ))}
         <span className="toolsep" />
         {([
-          ['park', 'Park', COST.park],
+          ['park', 'Park (koło)', COST.park],
+          ['park-rect', 'Park (prostokąt)', COST.park],
           ['stop-bus', 'Przystanek autobusowy', COST.stop],
           ['stop-tram', 'Przystanek tramwajowy', COST.stopTram],
+          ['tram-track', 'Torowisko', COST.road],
           ['mall', 'Centrum handlowe', COST.mall],
           ['university', 'Uczelnia', COST.university],
           ['road', 'Nowa droga', COST.road],
         ] as const).map(([k, label, cost]) => (
-          <button key={k} className={tool === k ? 'on' : ''} onClick={() => setTool(tool === k ? 'select' : k)}>
+          <button key={k} className={tool === k ? 'on' : ''} onClick={() => { setTool(tool === k ? 'select' : k); }}>
             {label} <small>{cost} zł</small>
           </button>
         ))}
@@ -493,20 +529,19 @@ export function Hud({
         ))}
       </nav>
 
-      <LayersPanel layers={layers} toggle={toggleLayer} />
-      <DonePanel sim={sim} />
-
       <div className="hint">
-        {tool === 'park' ? 'Kliknij w teren, aby posadzić park.'
-          : tool === 'stop-bus' ? 'Kliknij przy ulicy, aby postawić przystanek autobusowy.'
-            : tool === 'stop-tram' ? 'Kliknij przy torowisku, aby postawić przystanek tramwajowy.'
-              : tool === 'mall' ? 'Kliknij, aby wybudować centrum handlowe.'
-                : tool === 'university' ? 'Kliknij, aby wybudować uczelnię.'
-                  : tool === 'road' ? (roadFrom ? 'Kliknij drugi koniec drogi.' : 'Kliknij pierwszy koniec drogi.')
-                    : tool === 'disaster' ? `Kliknij miejsce katastrofy: ${DISASTERS[disaster].label}.`
-                      : flyMode
-            ? 'Tryb lotu: WASD / strzałki – ruch, Q i E – wysokość, mysz – rozglądanie, Shift – przyspieszenie, kółko – zbliżenie.'
-            : r || b || vehicle ? '' : 'Kliknij ulicę, budynek albo pojazd MPK. Wyszukaj miejsce na górze. Kamerą sterujesz myszą: LPM obrót, PPM przesuwanie, kółko zbliżenie.'}
+        {tool === 'park' ? 'Kliknij w teren, aby posadzić park okrągły.'
+          : tool === 'park-rect' ? (roadFrom ? 'Kliknij przeciwległy róg prostokąta.' : 'Kliknij pierwszy róg prostokątnego parku.')
+            : tool === 'stop-bus' ? 'Kliknij przy ulicy, aby postawić przystanek autobusowy.'
+              : tool === 'stop-tram' ? 'Kliknij przy torowisku, aby postawić przystanek tramwajowy.'
+                : tool === 'tram-track' ? (roadFrom ? 'Kliknij drugi koniec torowiska.' : 'Kliknij początek nowego torowiska.')
+                  : tool === 'mall' ? 'Kliknij, aby wybudować centrum handlowe.'
+                    : tool === 'university' ? 'Kliknij, aby wybudować uczelnię.'
+                      : tool === 'road' ? (roadFrom ? 'Kliknij drugi koniec drogi.' : 'Kliknij pierwszy koniec drogi.')
+                        : tool === 'disaster' ? `Kliknij miejsce katastrofy: ${DISASTERS[disaster].label}.`
+                          : flyMode
+                            ? 'Tryb lotu: WASD / strzałki – ruch, Q i E – wysokość, mysz – rozglądanie, Shift – przyspieszenie, kółko – zbliżenie.'
+                            : r || b || vehicle ? '' : 'Kliknij ulicę, budynek albo pojazd MPK. Panele z boków zwijasz strzałkami ‹ ›.'}
       </div>
       {toast && <div className="toast">{toast}</div>}
 

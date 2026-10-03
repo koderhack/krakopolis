@@ -10,6 +10,8 @@ export interface LayerDef {
 
 export const LAYERS: LayerDef[] = [
   { id: 'base', label: 'Podłoże i zieleń', hint: 'Teren, parki i woda z OpenStreetMap', defaultOn: true },
+  { id: 'basemap', label: 'Mapa satelitarna', hint: 'Ortofotomapa (Esri) pod miastem – drogi i budynki na realnym podkładzie', defaultOn: true },
+  { id: 'trees', label: 'Drzewa', hint: 'Drzewa i krzewy na terenach zielonych z OSM (parki, Planty, skwery)', defaultOn: true },
   { id: 'roads', label: 'Sieć drogowa', hint: 'Realne ulice z OSM', defaultOn: true },
   { id: 'traffic', label: 'Kolor ruchu', hint: 'Obciążenie odcinków (baseline / predykcja / symulacja)', defaultOn: true },
   { id: 'buildings', label: 'Budynki 3D', hint: 'Bryły z prawdziwych obrysów OSM', defaultOn: true },

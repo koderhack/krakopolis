@@ -94,6 +94,12 @@ export interface Snapshot extends Metrics {
   realTrams: number;
   realBuses: number;
   time: number;
+  /** Godzina symulacji (Europe/Warsaw), np. "17:42". */
+  clock: string;
+  /** Godzina 0–23 w strefie warszawskiej. */
+  hour: number;
+  /** Czy weekend (sob/niedz) w zegarze symulacji. */
+  weekend: boolean;
   /** Ile odcinków ma zamknięcie od gracza. */
   closed: number;
   assignmentAt: string;
@@ -109,7 +115,7 @@ export interface Snapshot extends Metrics {
 
 /** Liczba aut: ~18 na kilometr sieci zjazdowej, z sensownymi ograniczeniami. */
 /** Minimalny odstęp między pojazdami [m] – długość pojazdu plus margines. */
-export const minGap = (kind: number) => (kind === TRAM ? 26 : kind === BUS ? 14 : 7.5);
+export const minGap = (kind: number) => (kind === TRAM ? 48 : kind === BUS ? 18 : 8);
 
 const cmpVeh = (a: Veh, b: Veh) => (a.dir - b.dir) || (a.s - b.s);
 
@@ -126,6 +132,11 @@ export class Sim {
   peds: Ped[] = [];
   parks: Park[] = [];
   time = 0;
+  /**
+   * Zegar symulacji (ms epoch). Przy 1× trzymamy go zsynchronizowany z
+   * rzeczywistym czasem Europe/Warsaw; przy 2×/5× przyspieszamy od tego punktu.
+   */
+  clockMs = Date.now();
   version = 0;
   m: Metrics = { traffic: 0, transit: 0, pedestrians: 0, pollution: 0, noise: 0, satisfaction: 60, budget: 1000 };
 
@@ -324,6 +335,52 @@ export class Sim {
 
   /* ---------------------------------------------------------- symulacja */
 
+  /** Synchronizacja z zegarem ściennym (tryb 1×). */
+  syncClockToWall() {
+    this.clockMs = Date.now();
+  }
+
+  /** Przyspieszenie zegara (tryb 2×/5×): dt w sekundach symulacji. */
+  advanceClock(dtSec: number) {
+    this.clockMs += dtSec * 1000;
+  }
+
+  /** Części czasu w Europe/Warsaw. */
+  clockParts(): { hour: number; minute: number; second: number; weekend: boolean; label: string } {
+    const parts = warsawParts(this.clockMs);
+    const label = `${pad2(parts.hour)}:${pad2(parts.minute)}:${pad2(parts.second)}`;
+    return { ...parts, label };
+  }
+
+  /** Współczynnik popytu MPK / pieszych wg godziny (0–1+). */
+  transitDemandFactor(): number {
+    const { hour, weekend } = this.clockParts();
+    let f: number;
+    if (hour < 5) f = 0.12;
+    else if (hour < 7) f = 0.4;
+    else if (hour < 9) f = 1.05;
+    else if (hour < 15) f = 0.62;
+    else if (hour < 18) f = 1.05;
+    else if (hour < 22) f = 0.68;
+    else f = 0.28;
+    if (weekend) f *= hour >= 10 && hour < 20 ? 0.85 : 0.55;
+    return f;
+  }
+
+  /** 0 = głęboka noc, 1 = pełne południe – do oświetlenia sceny. */
+  dayFactor(): number {
+    const { hour, minute } = this.clockParts();
+    const t = hour + minute / 60;
+    // wschód ~5:30, zachód ~20:00 (przybliżenie na Kraków)
+    if (t < 5.0) return 0.08;
+    if (t < 6.5) return 0.08 + (t - 5) / 1.5 * 0.55;
+    if (t < 8) return 0.63 + (t - 6.5) / 1.5 * 0.37;
+    if (t < 17) return 1;
+    if (t < 19.5) return 1 - (t - 17) / 2.5 * 0.55;
+    if (t < 21.5) return 0.45 - (t - 19.5) / 2 * 0.3;
+    return 0.1;
+  }
+
   advance(dt: number) {
     this.acc = Math.min(this.acc + dt, 0.5);
     while (this.acc >= TICK) { this.step(TICK); this.acc -= TICK; }
@@ -376,7 +433,11 @@ export class Sim {
     for (let i = 0; i < active; i++) this.peds_.step(this.peds[i], dt);
 
     if (this.tickN % 10 === 0) this.metrics();
-    if (this.tickN % 120 === 0) this.retargetTransit();
+    if (this.tickN % 120 === 0) {
+      this.retargetTransit();
+      this.enforceTransitCaps();
+      this.respawnTransit();
+    }
     // Pojazdy, które wyjechały poza obszar, znikają.
     if (this.tickN % 30 === 0) this.cullOutsideArea();
     this.tickDisasters(dt);
@@ -391,9 +452,10 @@ export class Sim {
   private cost(r: RoadSim, kind: VehKind): number {
     const e = r.edge;
     if (kind === TRAM) {
-      // Tramwaje mają własne torowisko – zamknięcie ulicy dla aut ich nie dotyczy,
-      // chyba że odcinek nie jest w ogóle torowy.
-      return e.transit || e.hasTram ? travelTime(e, 0) : Infinity;
+      // Wyłącznie torowisko – nie jeździmy po zwykłych ulicach ani chodnikach.
+      if (r.destroyed) return Infinity;
+      const onRails = e.roadClass === 'tram' || e.hasTram;
+      return onRails ? travelTime(e, 0) : Infinity;
     }
     if (r.closed || r.pedestrian || !e.carAccess) return Infinity;
     if (e.oneway && r.closed) return Infinity;
@@ -459,12 +521,16 @@ export class Sim {
       return false;
     }
     // Tramwaj/autobus wracają do następnego węzła trasy.
-    // Tramwaje i autobusy idą DOKŁADNIE swoją trasą z GTFS – nie liczymy dla nich
-    // trasy algorytmem Dijkstry, bo jest już znana z pliku GTFS.
     for (let k = 1; k <= v.route.length; k++) {
       const idx = (v.si + k - 1) % v.route.length;
       const d = v.route[idx];
-      if (d === from || this.edgeBetween(from, d) === undefined) continue;
+      if (d === from) continue;
+      const eid = this.edgeBetween(from, d);
+      if (eid === undefined) continue;
+      if (v.kind === TRAM) {
+        const e = this.roads[eid]?.edge;
+        if (!e || (e.roadClass !== 'tram' && !e.hasTram)) continue;
+      }
       v.dest = d;
       v.si = idx;
       v.nodes = this.routeTail(from, idx);
@@ -487,6 +553,11 @@ export class Sim {
   }
 
   respawn(v: Veh) {
+    if (v.kind === TRAM || v.kind === BUS) {
+      // wróć na własną trasę GTFS zamiast lądować na przypadkowej ulicy
+      const route = this.routes.find((r) => r.ref === v.ref && (v.kind === TRAM ? r.kind === 'tram' : r.kind === 'bus'));
+      if (route) { this.spawnRouteVehicle(route); this.veh = this.veh.filter((x) => x !== v); return; }
+    }
     let id = 0;
     for (let i = 0; i < 60; i++) {
       id = Math.floor(this.rnd() * this.roads.length);
@@ -530,14 +601,24 @@ export class Sim {
     if (v.kind !== CAR) this.vehRoute = v.route;
     const r = this.roads[v.edge];
     const e = r.edge;
-    if (v.dwell > 0) { v.dwell -= dt; v.speed *= 0.9; }
+    if (v.dwell > 0) { v.speed *= 0.85; v.dwell -= dt; }
     else {
       if (r.destroyed || r.closure === 'closed') { v.speed = 0; v.dwell = Math.max(v.dwell, 1); return; }
       const congestionFactor = v.kind === TRAM ? 0.85 : Math.max(0.12, 1 - 0.85 * Math.pow(Math.min(1, r.level), 1.5));
-      let target = v.kind === TRAM ? 11 : e.speedLimit * congestionFactor;
-      // Zimno i śnieg – realna pogoda z Open-Meteo spowalnia ruch.
+      let target = v.kind === TRAM ? 9.5 : e.speedLimit * congestionFactor;
       if (this.temp < 2) target *= 0.9;
       if (v.kind === BUS) target *= 0.88;
+      // Hamowanie gdy z przodu (ten sam tor / kierunek) jest inny pojazd.
+      const ahead = this.vehicleAhead(v);
+      if (ahead) {
+        const gap = ahead.s - v.s;
+        const need = Math.max(minGap(v.kind), minGap(ahead.kind));
+        if (gap < need * 2.2) {
+          const t = Math.max(0, Math.min(1, (gap - need * 0.35) / (need * 1.8)));
+          target = Math.min(target, ahead.speed * 0.85 + target * t * 0.15);
+          if (gap < need * 1.05) target = Math.min(target, 0.4);
+        }
+      }
       v.speed += (target - v.speed) * Math.min(1, dt * 1.4);
       const before = v.s;
       v.s += v.speed * dt;
@@ -548,11 +629,22 @@ export class Sim {
     this.locate(v);
   }
 
+  /** Najbliższy pojazd z przodu na tym samym odcinku i kierunku. */
+  private vehicleAhead(v: Veh): Veh | null {
+    let best: Veh | null = null;
+    let bestS = Infinity;
+    for (const o of this.veh) {
+      if (o === v || o.edge !== v.edge || o.dir !== v.dir) continue;
+      if (o.s <= v.s + 0.05) continue;
+      if (o.s < bestS) { bestS = o.s; best = o; }
+    }
+    return best;
+  }
+
   /**
-   * Odstępy między pojazdami. Tramwaje nie mogą się wbić w siebie ani przejeżdżać
-   * przez budynki – tu pilnujemy tylko odległości na tym samym odcinku.
-   * Pojazdy grupujemy po odcinku i kierunku, sortujemy po pozycji i cofamy
-   * tego, który jest zbyt blisko (tzw. model followera).
+   * Odstępy między pojazdami na tym samym odcinku i kierunku.
+   * Sortujemy rosnąco po s: a jest z tyłu, b z przodu. Gdy odstęp za mały –
+   * spychamy tylny (a) i gasimy prędkość.
    */
   private enforceSpacing() {
     const byEdge = this.laneBuckets;
@@ -565,16 +657,16 @@ export class Sim {
       if (arr.length < 2) continue;
       arr.sort(cmpVeh);
       for (let i = 1; i < arr.length; i++) {
-        const a = arr[i - 1], b = arr[i];
-        if (a.dir !== b.dir) continue;
-        const gap = b.s - a.s;
-        if (gap >= 0) continue;
-        const need = minGap(b.kind);
-        if (-gap >= need) continue;
-        // cofamy b (i ewentualnie a) do wymaganego odstępu
-        b.s = a.s + need;
-        b.speed = 0;
-        if (b.dwell <= 0) b.dwell = 0.05;
+        const rear = arr[i - 1], front = arr[i];
+        if (rear.dir !== front.dir) continue;
+        const need = Math.max(minGap(rear.kind), minGap(front.kind));
+        const gap = front.s - rear.s;
+        if (gap >= need) continue;
+        // tylny wjechał w przedni – cofnij tylny i zatrzymaj
+        rear.s = front.s - need;
+        if (rear.s < 0) rear.s = 0;
+        rear.speed = Math.min(rear.speed, front.speed * 0.35);
+        if (rear.dwell <= 0) rear.dwell = 0.08;
       }
     }
   }
@@ -593,15 +685,41 @@ export class Sim {
 
   /* ------------------------------------------- komunikacja na realnych trasach */
 
-  /** Gęstość symulowanych pojazdów MPK wynika z długości trasy z GTFS. */
+  /** Gęstość symulowanych pojazdów MPK – zależna od godziny (mniej w nocy). */
   private retargetTransit() {
     const want = new Map<number, number>();
+    const demand = this.transitDemandFactor();
+    // Noc: budżet może spaść do 0 – bez sztucznego minimum floty.
+    let tramBudget = Math.max(0, Math.round(28 * demand));
+    let busBudget = Math.max(0, Math.round(55 * demand));
     for (const r of this.routes) {
       if (r.nodes.length < 4) continue;
       const len = this.routeLength(r);
-      want.set(r.index, Math.max(1, Math.min(4, Math.round(len / 900))));
+      if (r.kind === 'tram') {
+        const base = Math.min(2, Math.max(0, Math.round(len / 2000 * demand)));
+        const take = Math.min(base, tramBudget);
+        tramBudget -= take;
+        want.set(r.index, take);
+      } else {
+        const base = Math.min(2, Math.max(0, Math.round(len / 1400 * demand)));
+        const take = Math.min(base, busBudget);
+        busBudget -= take;
+        want.set(r.index, take);
+      }
     }
     this.transitVehPerRoute = want;
+  }
+
+  /** Usuwa nadmiarowe pojazdy MPK, gdy cap spadł (np. po retarget). */
+  private enforceTransitCaps() {
+    for (const r of this.routes) {
+      const want = this.transitVehPerRoute.get(r.index) ?? 0;
+      const mine = this.veh.filter((v) => v.kind !== CAR && v.route === r.nodes);
+      for (let i = want; i < mine.length; i++) {
+        const idx = this.veh.indexOf(mine[i]);
+        if (idx >= 0) this.veh.splice(idx, 1);
+      }
+    }
   }
 
   private routeLength(r: SimRoute): number {
@@ -631,21 +749,34 @@ export class Sim {
   /** Wstawia jeden pojazd MPK w losowym miejscu jego realnej trasy GTFS. */
   private spawnRouteVehicle(r: SimRoute) {
     if (r.nodes.length < 2) return;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    const isTram = r.kind === 'tram';
+    const minClear = isTram ? 70 : 28;
+    for (let attempt = 0; attempt < 16; attempt++) {
       const startAt = Math.floor(this.rnd() * r.nodes.length);
       const node = r.nodes[startAt];
       const next = r.nodes[(startAt + 1) % r.nodes.length];
       const id = this.edgeBetween(node, next);
       if (id === undefined) continue;
-      const v = this.newVeh(r.kind === 'tram' ? TRAM : BUS, r.ref, r.nodes);
+      const edge = this.roads[id]?.edge;
+      if (!edge) continue;
+      if (isTram && edge.roadClass !== 'tram' && !edge.hasTram) continue;
+      const dir: 1 | -1 = edge.a === node ? 1 : -1;
+      const s = this.rnd() * Math.max(1, edge.len - minClear * 0.5);
+      // nie spawnuj na drugim pojeździe
+      let blocked = false;
+      for (const o of this.veh) {
+        if (o.edge !== id || o.dir !== dir) continue;
+        if (Math.abs(o.s - s) < minClear) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      const v = this.newVeh(isTram ? TRAM : BUS, r.ref, r.nodes);
       v.variant = this.rnd();
       v.edge = id;
-      v.dir = this.roads[id].edge.a === node ? 1 : -1;
-      v.s = this.rnd() * this.roads[id].edge.len;
+      v.dir = dir;
+      v.s = s;
       v.si = startAt;
       v.dest = next;
       v.stuck = 0;
-      // Ścieżka na całą trasę – pojazdy MPK jadą swoim realnym kursem.
       v.nodes = r.nodes.slice(startAt + 1);
       this.locate(v);
       this.veh.push(v);
@@ -721,7 +852,12 @@ export class Sim {
     const pollution = clamp(8 + 0.5 * traffic + 24 * (tlSum / Math.max(1, total)) * this.airFactor - np * 4 - (pedLen / Math.max(1, total)) * 45 + this.disasterMood.pollution);
     const realTransitShare = Math.min(35, this.realVehicles.length * 0.25);
     const transit = clamp(18 + this.stops.length * 0.4 + realTransitShare + 45 * (tn ? tr / tn : 1));
-    const target = clamp(240 + pedLen / 5 + closedLen / 8 + np * 24 + this.stops.length * 0.35, 80, MAX_PEDS);
+    const demand = this.transitDemandFactor();
+    const target = clamp(
+      (120 + pedLen / 5 + closedLen / 8 + np * 24 + this.stops.length * 0.35) * (0.35 + 0.85 * demand),
+      Math.max(40, Math.round(80 * demand)),
+      MAX_PEDS,
+    );
     const old = Math.round(this.activePeds);
     this.activePeds += clamp(target - this.activePeds, -18, 18);
     const now = Math.round(this.activePeds);
@@ -865,21 +1001,66 @@ export class Sim {
     return null;
   }
 
-  addPark(x: number, z: number): string | null {
+  addPark(x: number, z: number, shape: 'circle' | 'rect' = 'circle', w = 52, d = 36): string | null {
     const area = this.city?.area;
     const maxX = ((area ? area.maxLon - area.origin.lon : 0.011) * 111320 * Math.cos((50.06 * Math.PI) / 180));
     const maxZ = ((area ? area.origin.lat - area.minLat : 0.009) * 111320);
     if (Math.abs(x) > maxX || z < -maxZ || z > maxZ) return 'Poza obszarem miasta.';
-    if (this.parks.some((p) => Math.hypot(p.x - x, p.z - z) < 50)) return 'W tym miejscu jest już park.';
-    if (this.roads.some((r) => Math.hypot((r.edge.ax + r.edge.bx) / 2 - x, (r.edge.az + r.edge.bz) / 2 - z) < 0)) {
-      // za blisko drogi – sprawdzamy dokładnie
-      if (this.roads.some((r) => distToSegment(r.edge, x, z) < 14)) return 'Za blisko jezdni. Kliknij w środek kwartału.';
-    }
+    if (this.parks.some((p) => Math.hypot(p.x - x, p.z - z) < 40)) return 'W tym miejscu jest już park.';
+    if (this.roads.some((r) => distToSegment(r.edge, x, z) < 12)) return 'Za blisko jezdni. Kliknij w środek kwartału.';
     if (!this.spend(COST.park)) return 'Za mało środków w budżecie.';
-    this.parks.push({ x, z, r: 26 });
+    const park: Park = shape === 'rect'
+      ? { x, z, r: Math.max(8, w / 2), d: Math.max(8, d / 2), shape: 'rect' }
+      : { x, z, r: Math.max(12, Math.min(w, d) / 2), shape: 'circle' };
+    this.parks.push(park);
     this.reweight();
     this.invalidateRouting();
     this.reroute();
+    return null;
+  }
+
+  /** Nowe torowisko tramwajowe – jak droga, ale tylko dla tramwajów. */
+  addTramTrack(x1: number, z1: number, x2: number, z2: number): string | null {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    if (len < 40) return 'Torowisko musi mieć co najmniej 40 m.';
+    if (len > 900) return 'Torowisko może mieć maksymalnie 900 m.';
+    if (!this.spend(COST.road)) return 'Za mało środków w budżecie.';
+
+    const a = this.g.nodes.length, b = a + 1;
+    this.g.nodes.push({ x: x1, z: z1 }, { x: x2, z: z2 });
+    const id = this.g.edges.length;
+    const speed = 30 / 3.6;
+    this.g.edges.push({
+      id, name: 'Nowe torowisko', roadClass: 'tram',
+      a, b, ax: x1, az: z1, bx: x2, bz: z2,
+      hx: (x2 - x1) / len, hz: (z2 - z1) / len, len,
+      speedLimit: speed, capacity: 0,
+      lanesForward: 1, oneway: false, carAccess: false,
+      transit: true, hasTram: true, osmId: -1, at: [a, b],
+    });
+    (this.g.adj[a] ??= []).push({ e: id, to: b });
+    (this.g.adj[b] ??= []).push({ e: id, to: a });
+
+    const rs: RoadSim = {
+      edge: this.g.edges[id],
+      closure: 'none', destroyed: false,
+      baseline: 0.15, baselineOrigin: 'SIMULATED',
+      baselineSpeed: speed, predicted: 0.15, level: 0.1, capacity: 0,
+      closed: false, pedestrian: false, addedStop: false, realStop: false,
+      transit: true, built: true, vehicles: 0, walkWeight: 1,
+    };
+    this.roads.push(rs);
+    this.invalidateRouting();
+    this.reroute();
+    this.history.push({
+      label: 'nowe torowisko', at: Date.now(),
+      apply: () => { this.invalidateRouting(); this.reroute(); },
+      revert: () => {
+        this.roads = this.roads.filter((x) => x !== rs);
+        this.invalidateRouting();
+        this.reroute();
+      },
+    });
     return null;
   }
 
@@ -891,6 +1072,12 @@ export class Sim {
     if (!r) return 'Nie kliknij ulicy.';
     if (r.destroyed || r.closure === 'closed') return 'Nie postawisz przystanku na zamkniętej ulicy.';
     if (r.addedStop) return 'Na tym odcinku masz już swój przystanek.';
+    if (mode === 'tram' && r.edge.roadClass !== 'tram' && !r.edge.hasTram) {
+      return 'Przystanek tramwajowy stawia się tylko przy torowisku.';
+    }
+    if (mode === 'bus' && !r.edge.carAccess && r.edge.roadClass !== 'pedestrian') {
+      return 'Przystanek autobusowy wymaga ulicy przejezdnej.';
+    }
     if (r.realStop) {
       const isTramReal = this.g.edges[roadId].hasTram || this.g.edges[roadId].roadClass === 'tram';
       if (isTramReal === (mode === 'tram')) return 'Tu już jest prawdziwy przystanek MPK tego rodzaju.';
@@ -1157,6 +1344,7 @@ export class Sim {
   snapshot(): Snapshot {
     const realTrams = this.realVehicles.filter((v) => v.type === 'tram').length;
     const realBuses = this.realVehicles.filter((v) => v.type === 'bus').length;
+    const clock = this.clockParts();
     return {
       ...this.m,
       cars: this.veh.filter((v) => v.kind === CAR).length,
@@ -1167,6 +1355,9 @@ export class Sim {
       realVehicles: this.realVehicles.length,
       realTrams, realBuses,
       time: this.time,
+      clock: clock.label,
+      hour: clock.hour,
+      weekend: clock.weekend,
       closed: this.roads.filter((r) => r.closure === 'closed' || r.destroyed).length,
       built: this.playerBuildings.length,
       newStops: this.playerStops.length,
@@ -1178,6 +1369,29 @@ export class Sim {
     };
   }
 
+}
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+/** Godzina lokalna Kraków/Warszawa z ms epoch. */
+function warsawParts(ms: number): { hour: number; minute: number; second: number; weekend: boolean } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Warsaw',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    weekday: 'short',
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '0';
+  const hour = Number(get('hour')) % 24;
+  const minute = Number(get('minute'));
+  const second = Number(get('second'));
+  const wd = get('weekday').toLowerCase();
+  const weekend = wd.startsWith('sat') || wd.startsWith('sun') || wd.startsWith('sob') || wd.startsWith('nie');
+  return { hour, minute, second, weekend };
 }
 
 function distToSegment(e: GraphEdge, x: number, z: number): number {

@@ -50,7 +50,11 @@ export interface Ped {
 export interface Park {
   x: number;
   z: number;
+  /** Promień (koło) albo pół-szerokość (prostokąt). */
   r: number;
+  /** Pół-głębokość prostokąta; brak = koło o promieniu r. */
+  d?: number;
+  shape?: 'circle' | 'rect';
 }
 
 /** Piesi to wyłącznie SIMULATED – liczba agentów, nie danych z miasta. */

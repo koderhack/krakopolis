@@ -75,11 +75,11 @@ function freshCache(name: string): Buffer | null {
   return ageH <= CACHE_MAX_AGE_H ? readFileSync(p) : null;
 }
 /** Gdy pobieranie zawiedzie, użyj ostatniego udanego pobrania z .cache. */
-async function fetchWithCache(name: string, url: string, init?: RequestInit): Promise<{ buf: Buffer; fetchedAt: string; stale: boolean }> {
+async function fetchWithCache(name: string, url: string, init?: RequestInit, tries = 4): Promise<{ buf: Buffer; fetchedAt: string; stale: boolean }> {
   const hit = freshCache(name);
   if (hit) return { buf: hit, fetchedAt: (existsSync(cachePath(name + '.at')) ? readFileSync(cachePath(name + '.at'), 'utf8') : nowIso()), stale: false };
   try {
-    const buf = await fetchBuf(url, init);
+    const buf = await fetchBuf(url, init, tries);
     writeFileSync(cachePath(name), buf);
     return { buf, fetchedAt: nowIso(), stale: false };
   } catch (e) {
@@ -102,7 +102,7 @@ interface OsmElement {
   nodes?: number[]; geometry?: { lat: number; lon: number }[]; tags?: Record<string, string>;
 }
 
-const HIGHWAY_RE = '^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|pedestrian|footway|path|steps|track)$';
+const HIGHWAY_RE = '^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|pedestrian|footway|path|steps|track)$';
 
 function overpassQuery(b: { minLat: number; maxLat: number; minLon: number; maxLon: number }): string {
   const bb = `${b.minLat.toFixed(6)},${b.minLon.toFixed(6)},${b.maxLat.toFixed(6)},${b.maxLon.toFixed(6)}`;
@@ -148,20 +148,30 @@ function riverQuery(b: { minLat: number; maxLat: number; minLon: number; maxLon:
 out geom tags;`;
 }
 
-/** Wykonuje zapytanie przez mirrory i zapisuje wynik w .cache. */
-async function overpass(name: string, query: string, tileIdx: number): Promise<OsmElement[]> {
+/**
+ * Wykonuje zapytanie przez mirrory i zapisuje wynik w .cache.
+ *
+ * `budgetMs` to twardy limit czasu na całe zapytanie. Overpass potrafi
+ * zwracać 504 przez kilkanaście sekund albo w ogóle nie odpowiedzieć, a bez
+ * limitu jedno z opcjonalnych źródeł (POI, rzeki) blokowało cały zapis danych –
+ * i zostawiało nas na starej, sprzed wielu wersji wypiance.
+ */
+async function overpass(name: string, query: string, tileIdx: number, budgetMs = 45_000): Promise<OsmElement[]> {
   const body = new URLSearchParams({ data: query }).toString();
+  const deadline = Date.now() + budgetMs;
   let err: unknown;
   for (const m of OVERPASS_MIRRORS) {
+    if (Date.now() > deadline) break;
     try {
       const { buf, stale } = await fetchWithCache(name + '-' + tileIdx + '.json', m, {
         method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      });
+      }, 1);
+      void stale;
       const data = JSON.parse(buf.toString('utf8')) as { elements?: OsmElement[] };
       return data.elements ?? [];
     } catch (e) { err = e; }
   }
-  log(`  ! zapytanie ${name} nieudane: ${String(err)}`);
+  log(`  ! zapytanie ${name} nieudane (pomijam, reszta danych się zapisze): ${String(err)}`);
   return [];
 }
 
@@ -235,31 +245,55 @@ function buildingHeight(t: Record<string, string>): number {
 }
 
 /**
- * Uproszczenie pierścienia – Douglas-Peucker z tolerancją 0,6 m.
+ * Uproszczenie pierścienia – Douglas-Peucker z tolerancją 0,8 m.
  * Trzyma kształt budynku (narożniki, wycięcia), ale ogranicza liczbę punktów,
  * żeby plik z danymi pozostał rozsądnego rozmiaru.
+ *
+ * OSM zamyka way budynków: pierwszy punkt = ostatni. Bez otwarcia pierścienia
+ * baza DP ma długość 0, wszystkie odstępy wychodzą 0 i zostają tylko 2 punkty
+ * → pusty obrys → w 3D prostopadłościan zamiast prawdziwego kształtu.
  */
-function simplifyRing(ring: [number, number][], tol = 0.6): [number, number][] {
-  if (ring.length <= 5) return ring;
-  const keep = new Uint8Array(ring.length);
+function simplifyRing(ring: [number, number][], tol = 0.8): [number, number][] {
+  if (ring.length < 3) return [];
+  // otwórz zamknięty pierścień (pierwszy ≈ ostatni)
+  let pts = ring;
+  if (Math.hypot(ring[0][0] - ring[ring.length - 1][0], ring[0][1] - ring[ring.length - 1][1]) < 0.35) {
+    pts = ring.slice(0, -1);
+  }
+  // usuń kolejne duplikaty po zaokrągleniu
+  const dedup: [number, number][] = [];
+  for (const p of pts) {
+    const q: [number, number] = [round(p[0]), round(p[1])];
+    const prev = dedup[dedup.length - 1];
+    if (!prev || Math.hypot(prev[0] - q[0], prev[1] - q[1]) > 0.15) dedup.push(q);
+  }
+  if (dedup.length >= 3 && Math.hypot(dedup[0][0] - dedup[dedup.length - 1][0], dedup[0][1] - dedup[dedup.length - 1][1]) < 0.35) {
+    dedup.pop();
+  }
+  if (dedup.length < 3) return [];
+  if (dedup.length <= 6) return dedup;
+
+  const keep = new Uint8Array(dedup.length);
   keep[0] = 1;
-  keep[ring.length - 1] = 1;
-  const stack: [number, number][] = [[0, ring.length - 1]];
+  keep[dedup.length - 1] = 1;
+  const stack: [number, number][] = [[0, dedup.length - 1]];
   while (stack.length) {
     const [a, b] = stack.pop()!;
     let worst = -1, worstD = tol;
-    const [ax, az] = ring[a], [bx, bz] = ring[b];
+    const [ax, az] = dedup[a], [bx, bz] = dedup[b];
     const dx = bx - ax, dz = bz - az;
-    const l2 = dx * dx + dz * dz || 1;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) continue;
     for (let i = a + 1; i < b; i++) {
-      const d = Math.abs((ring[i][0] - ax) * dz - (ring[i][1] - az) * dx) / Math.sqrt(l2);
+      const d = Math.abs((dedup[i][0] - ax) * dz - (dedup[i][1] - az) * dx) / len;
       if (d > worstD) { worstD = d; worst = i; }
     }
     if (worst > 0) { keep[worst] = 1; stack.push([a, worst], [worst, b]); }
   }
   const out: [number, number][] = [];
-  for (let i = 0; i < ring.length; i++) if (keep[i]) out.push([round(ring[i][0]), round(ring[i][1])]);
-  return out.length >= 3 ? out : [];
+  for (let i = 0; i < dedup.length; i++) if (keep[i]) out.push(dedup[i]);
+  // awaryjnie: lepiej pełny obrys niż pusty (prostopadłościan w scenie)
+  return out.length >= 3 ? out : dedup;
 }
 
 /** Kadr obrysu budynku: najdłuższa krawędź wyznacza oś dłuższą. */
@@ -445,6 +479,11 @@ function buildCity(osm: OsmElement[]): BakedCity {
     const hv = hash01(el.id);
     const landmark = el.tags.building === 'church' || el.tags.building === 'cathedral' || el.tags.building === 'chapel'
       || el.tags.tourism === 'attraction' || !!el.tags.historic || el.tags.amenity === 'place_of_worship';
+    // Prawdziwy obrys z OSM – na nim budujemy bryłę w 3D (jak w Apple Maps).
+    // Zabytki i duże bryły: niższa tolerancja, żeby Sukiennice/Wawel nie
+    // zamieniły się w sześciokąt.
+    const areaApprox = f.w * f.d;
+    const tol = landmark || areaApprox > 2500 ? 0.35 : areaApprox > 800 ? 0.55 : 0.8;
     buildings.push({
       x: round(f.x), z: round(f.z), w: round(f.w), d: round(f.d), h: round(buildingHeight(el.tags)),
       rot: round(f.rot),
@@ -452,54 +491,17 @@ function buildCity(osm: OsmElement[]): BakedCity {
       roof: el.tags['roof:colour'] ?? ROOFS[Math.floor(hv * 977) % ROOFS.length],
       name: el.tags.name,
       landmark,
-      // Prawdziwy obrys z OSM – na nim budujemy bryłę w 3D (jak w Apple Maps).
-      ring: simplifyRing(ring),
+      ring: simplifyRing(ring, tol),
       levels: isFinite(cleanNum(el.tags['building:levels'])) ? cleanNum(el.tags['building:levels']) : undefined,
     });
   }
 
-  // 3b. Odcinki biegnące przez budynki.
-  // Zdarza się, że OSM ma błędy geometrii (budynek zasłania ulicę, torowisko
-  // poprowadzone przez kwartał). Pojazdy nie mogą przejeżdżać przez budynki,
-  // więc takie odcinki usuwamy z grafu – symulacja jeździ po realnej, poprawnej
-  // geometrii, a nie po błędzie danych.
-  const bCell = 20;
-  const bGrid = new Map<string, number[]>();
-  buildings.forEach((b, i) => {
-    const rad = Math.hypot(b.w, b.d) / 2;
-    const c0 = Math.floor((b.x - rad) / bCell), c1 = Math.floor((b.x + rad) / bCell);
-    const d0 = Math.floor((b.z - rad) / bCell), d1 = Math.floor((b.z + rad) / bCell);
-    for (let c = c0; c <= c1; c++)
-      for (let d = d0; d <= d1; d++) {
-        const k = `${c},${d}`;
-        const arr = bGrid.get(k);
-        if (arr) arr.push(i); else bGrid.set(k, [i]);
-      }
-  });
-  const insideBuilding = (x: number, z: number): boolean => {
-    const arr = bGrid.get(`${Math.floor(x / bCell)},${Math.floor(z / bCell)}`);
-    if (!arr) return false;
-    for (const i of arr) {
-      const b = buildings[i];
-      const cos = Math.cos(-b.rot), sin = Math.sin(-b.rot);
-      const dx = x - b.x, dz = z - b.z;
-      const lx = dx * cos - dz * sin, lz = dx * sin + dz * cos;
-      // 0.4 m marginesu – pojazd musi mieścić się na jezdni obok budynku
-      if (Math.abs(lx) < b.w / 2 - 0.4 && Math.abs(lz) < b.d / 2 - 0.4) return true;
-    }
-    return false;
-  };
-  const beforeRoads = finalRoads.length;
-  const keptRoads = finalRoads.filter((r) => {
-    const A = nodes[r.a], B = nodes[r.b];
-    // sprawdzamy kilka punktów wzdłuż odcinka, nie tylko środek
-    for (const t of [0.25, 0.5, 0.75]) {
-      if (insideBuilding(A.x + (B.x - A.x) * t, A.z + (B.z - A.z) * t)) return false;
-    }
-    return true;
-  });
-  for (let i = 0; i < keptRoads.length; i++) keptRoads[i].id = i;
-  log(`  odcinki przechodzące przez budynki usunięte: ${beforeRoads - keptRoads.length}`);
+  // 3b. NIE usuwamy odcinków „przez budynki”.
+  // Wcześniejsze kasowanie rozrywało siatkę ulic Starego Miasta (fałszywe
+  // trafienia AABB + realne nachodzenie obrysów OSM na jezdnię). Zamiast tego
+  // budynki są odsunięte od pasa drogowego w cityAdapter (RoadCorridor).
+  const keptRoads = finalRoads;
+  log(`  odcinki dróg zachowane w całości: ${keptRoads.length} (budynki odsuną się od jezdni w adapterze)`);
 
   // 4. Woda i zieleń
   const polygons: BakedPolygon[] = [];
@@ -805,6 +807,16 @@ async function fetchLiveVehicles(trips: Map<string, { route: string; dir: number
  * miał realny profil terenu (Wawel, kopiec Sikar, dolina Wisły).
  */
 async function fetchTerrain(): Promise<BakedTerrain> {
+  const existing = join(OUT_DIR, 'terrain.json');
+  if (existsSync(existing) && process.env.INGEST_FORCE_TERRAIN !== '1') {
+    try {
+      const t = JSON.parse(readFileSync(existing, 'utf8')) as BakedTerrain;
+      if (t.heights?.length) {
+        log('  używam istniejącego public/data/terrain.json');
+        return t;
+      }
+    } catch { /* pobierz od nowa */ }
+  }
   const halfX = ((AREA.maxLon - ORIGIN.lon) * 111_320 * Math.cos((ORIGIN.lat * Math.PI) / 180)) / 2 + 300;
   const halfZ = ((ORIGIN.lat - AREA.minLat) * 111_320) / 2 + 300;
   const cols = 48, rows = 48;
@@ -820,7 +832,8 @@ async function fetchTerrain(): Promise<BakedTerrain> {
     const la = lats.slice(i, i + CHUNK), lo = lons.slice(i, i + CHUNK);
     const url = `${ENDPOINTS.openMeteo}/elevation?latitude=${la.map((v) => v.toFixed(6)).join(',')}&longitude=${lo.map((v) => v.toFixed(6)).join(',')}`;
     try {
-      const j = await fetchJson<{ elevation: number[] }>(url);
+      const buf = await fetchBuf(url, {}, 1);
+      const j = JSON.parse(buf.toString('utf8')) as { elevation: number[] };
       heights.push(...j.elevation.map((v) => Math.round(v * 10) / 10));
     } catch (e) {
       log('  ! wysokości niedostępne:', String(e));
@@ -848,29 +861,62 @@ async function main() {
   log('=== 1/5 OpenStreetMap (Overpass API) ===');
   const osm = await fetchOsm();
 
-  // Miejsca i rzeka osobnymi zapytaniami – duże zapytanie z wyłącznie
-  // wayami potrafi zostać przerwane przez Overpass, a tracimy wtedy wszystko.
-  log('OSM: miejsca (POI)');
-  const tiles = areaTiles(2, 3);
-  const poiEls: OsmElement[] = [];
-  for (const [i, t] of tiles.entries()) {
-    const els = await overpass('osm-poi', poiQuery(t), i);
-    for (const e of els) {
-      const lat = e.lat ?? (e.center?.lat);
-      const lon = e.lon ?? (e.center?.lon);
-      if (lat !== undefined && lon !== undefined) poiEls.push({ ...e, lat, lon });
+  // POI / rzeki: opcjonalne. Bez sieci (albo INGEST_FAST=1) pomijamy, żeby
+  // zawsze zapisać pełną siatkę dróg z .cache osm-tile-*.json.
+  const skipExtra = process.env.INGEST_FAST === '1' || process.env.INGEST_OFFLINE === '1';
+  if (skipExtra) {
+    log('OSM: pomijam POI i rzeki (INGEST_FAST/OFFLINE) – używam kafelków + starych pois z poprzedniego pliku');
+    try {
+      const prev = JSON.parse(readFileSync(join(OUT_DIR, 'osm-city.json'), 'utf8')) as BakedCity;
+      if (prev.pois?.length) {
+        for (const p of prev.pois) {
+          osm.push({
+            type: 'node', id: Math.round(p.x * 1000 + p.z),
+            lat: ORIGIN.lat - p.z / 111_320,
+            lon: ORIGIN.lon + p.x / (111_320 * Math.cos((ORIGIN.lat * Math.PI) / 180)),
+            tags: { name: p.name, amenity: p.category === 'Poczta' ? 'post_office' : 'attraction' },
+          });
+        }
+      }
+      // zachowaj też wodę/zieleń z poprzedniego pliku przez geometrię – nie, polygons
+      // powstają z osm elements; river z kafelków głównych już jest w way waterway
+    } catch { /* brak poprzedniego pliku */ }
+  } else {
+    log('OSM: miejsca (POI)');
+    const tiles = areaTiles(2, 3);
+    const poiEls: OsmElement[] = [];
+    const poiBudget = Date.now() + 40_000;
+    for (const [i, t] of tiles.entries()) {
+      if (Date.now() > poiBudget) { log('  ! pomijam część kafelków POI'); break; }
+      const els = await overpass('osm-poi', poiQuery(t), i, 8_000);
+      for (const e of els) {
+        const lat = e.lat ?? (e.center?.lat);
+        const lon = e.lon ?? (e.center?.lon);
+        if (lat !== undefined && lon !== undefined) poiEls.push({ ...e, lat, lon });
+      }
     }
-  }
-  log(`OSM: ${poiEls.length} miejsc`);
-  osm.push(...poiEls);
+    log(`OSM: ${poiEls.length} miejsc`);
+    osm.push(...poiEls);
 
-  log('OSM: rzeki');
-  const riverEls: OsmElement[] = [];
-  for (const [i, t] of tiles.entries()) riverEls.push(...(await overpass('osm-river', riverQuery(t), i)));
-  log(`OSM: ${riverEls.length} fragmentów rzeki`);
-  osm.push(...riverEls);
+    log('OSM: rzeki');
+    const riverEls: OsmElement[] = [];
+    const riverBudget = Date.now() + 25_000;
+    for (const [i, t] of tiles.entries()) {
+      if (Date.now() > riverBudget) break;
+      riverEls.push(...(await overpass('osm-river', riverQuery(t), i, 6_000)));
+    }
+    log(`OSM: ${riverEls.length} fragmentów rzeki`);
+    osm.push(...riverEls);
+  }
   log(`OSM: ${osm.length} elementów łącznie`);
   const city = buildCity(osm);
+  // Przywróć pois z poprzedniego pliku, jeśli nowe zapytanie nic nie dało
+  if (!city.pois.length) {
+    try {
+      const prev = JSON.parse(readFileSync(join(OUT_DIR, 'osm-city.json'), 'utf8')) as BakedCity;
+      if (prev.pois?.length) city.pois = prev.pois;
+    } catch { /* ignore */ }
+  }
   log(`OSM → graf: ${city.nodes.length} węzłów, ${city.roads.length} odcinków, ${city.buildings.length} budynków, ${city.polygons.length} poligonów`);
 
   log('=== 2/5 ZTP Kraków – GTFS statyczny ===');
