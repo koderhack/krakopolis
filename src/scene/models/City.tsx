@@ -117,14 +117,15 @@ export const Terrain = memo(function Terrain({
     };
   }, []);
 
-  // Płaskie podłoże – tak wyglądała mapa przed wprowadzeniem wzniesień.
-  // Siatka wysokości z DEM jest w pliku danych, ale nie unosi terenu.
+  // Podłoże dokładnie pod bboxem – bez „wystających” 700 m, które psuły krawędź.
   const terrainGeo = useMemo(() => {
-    const geo = new THREE.PlaneGeometry(halfX * 2 + 700, halfZ * 2 + 700, 1, 1);
+    const geo = new THREE.PlaneGeometry(mapBounds.w, mapBounds.d, 1, 1);
     geo.rotateX(-Math.PI / 2);
     void terrain;
+    void halfX;
+    void halfZ;
     return geo;
-  }, [halfX, halfZ, terrain]);
+  }, [mapBounds.w, mapBounds.d, terrain, halfX, halfZ]);
 
   const basemapGeo = useMemo(() => {
     const geo = new THREE.PlaneGeometry(mapBounds.w, mapBounds.d, 1, 1);
@@ -161,7 +162,7 @@ export const Terrain = memo(function Terrain({
     <group>
       <mesh
         geometry={terrainGeo}
-        position={[0, 0.02, 0]}
+        position={[mapBounds.cx, 0.02, mapBounds.cz]}
         receiveShadow
         onClick={clickGround}
       >
@@ -500,12 +501,13 @@ export function buildingMass(buildings: { x: number; z: number; w: number; d: nu
 }
 
 export const Buildings = memo(function Buildings({
-  buildings, hiddenKey, ver, onSelect,
+  buildings, hiddenKey, ver, onSelect, onFocus,
 }: {
   buildings: Parameters<typeof buildingMass>[0];
   hiddenKey: string;
   ver: number;
   onSelect: (i: number) => void;
+  onFocus?: (i: number) => void;
 }) {
   const w = useRef<THREE.Mesh>(null);
   const r = useRef<THREE.Mesh>(null);
@@ -530,23 +532,32 @@ export const Buildings = memo(function Buildings({
     if (m) m.geometry.computeBoundingSphere();
   }, [ver]);
 
-  const pick = (e: ThreeEvent<MouseEvent>) => {
-    e.stopPropagation();
-    if (e.delta > 4) return;
-    // najbliższy budynek do punktu trafienia
-    const x = e.point.x, z = e.point.z;
+  const findNear = (x: number, z: number) => {
     let best = -1, bd = Infinity;
     buildings.forEach((b, i) => {
       const d = Math.hypot(x - b.x, z - b.z);
       if (d < bd) { bd = d; best = i; }
     });
-    if (best >= 0 && bd < Math.max(30, buildings[best].w)) onSelect(best);
+    return best >= 0 && bd < Math.max(30, buildings[best].w) ? best : -1;
+  };
+
+  const pick = (e: ThreeEvent<MouseEvent>) => {
+    e.stopPropagation();
+    if (e.delta > 4) return;
+    const best = findNear(e.point.x, e.point.z);
+    if (best >= 0) onSelect(best);
+  };
+
+  const focus = (e: ThreeEvent<MouseEvent>) => {
+    e.stopPropagation();
+    const best = findNear(e.point.x, e.point.z);
+    if (best >= 0) onFocus?.(best);
   };
 
   return (
     <group>
-      <mesh ref={w} material={wallMat} castShadow receiveShadow onClick={pick} />
-      <mesh ref={r} material={roofMat} castShadow receiveShadow />
+      <mesh ref={w} material={wallMat} castShadow receiveShadow onClick={pick} onDoubleClick={focus} />
+      <mesh ref={r} material={roofMat} castShadow receiveShadow onClick={pick} onDoubleClick={focus} />
     </group>
   );
 });
@@ -636,21 +647,56 @@ export const PlayerParks = memo(function PlayerParks({ parks, ver }: { parks: { 
   );
 });
 
-export function PlayerStructures({ sim, ver }: { sim: Sim; ver: number }) {
+export function PlayerStructures({
+  sim, ver, sel, onSelect, onFocus,
+}: {
+  sim: Sim;
+  ver: number;
+  sel?: number | null;
+  onSelect?: (id: number) => void;
+  onFocus?: (id: number) => void;
+}) {
   return (
     <group key={ver}>
-      {sim.playerBuildings.map((b) => (
-        <group key={b.id}>
-          <mesh position={[b.x, groundY(b.x, b.z) + b.h / 2 + 0.4, b.z]} castShadow receiveShadow>
-            <boxGeometry args={[b.w, b.h, b.d]} />
-            <meshStandardMaterial color={b.kind === 'mall' ? '#c8b7a0' : '#d8cdb8'} roughness={0.7} />
-          </mesh>
-          <mesh position={[b.x, groundY(b.x, b.z) + b.h + 1.3, b.z]} castShadow>
-            <boxGeometry args={[b.w + 1.6, 1.8, b.d + 1.6]} />
-            <meshStandardMaterial color={b.kind === 'mall' ? '#4a6a8a' : '#7a5f8a'} roughness={0.6} />
-          </mesh>
-        </group>
-      ))}
+      {sim.playerBuildings.map((b) => {
+        const flat = b.kind === 'park' || b.kind === 'parking';
+        const rot = b.rot ?? 0;
+        const selected = sel === b.id;
+        return (
+          <group
+            key={b.id}
+            onClick={(e) => { e.stopPropagation(); if (e.delta > 4) return; onSelect?.(b.id); }}
+            onDoubleClick={(e) => { e.stopPropagation(); onFocus?.(b.id); }}
+          >
+            <mesh
+              position={[b.x, groundY(b.x, b.z) + (flat ? 0.35 : b.h / 2 + 0.4), b.z]}
+              rotation-y={rot}
+              castShadow receiveShadow
+            >
+              <boxGeometry args={[b.w, flat ? 0.5 : b.h, b.d]} />
+              <meshStandardMaterial color={selected ? '#7ec8ff' : b.color} roughness={0.7} />
+            </mesh>
+            {!flat && (
+              <mesh position={[b.x, groundY(b.x, b.z) + b.h + 1.0, b.z]} rotation-y={rot} castShadow>
+                <boxGeometry args={[b.w + 1.2, Math.min(2.2, b.h * 0.12), b.d + 1.2]} />
+                <meshStandardMaterial color={b.roof} roughness={0.6} />
+              </mesh>
+            )}
+            {b.kind === 'school' && (
+              <mesh position={[b.x, groundY(b.x, b.z) + b.h + 3.2, b.z]}>
+                <boxGeometry args={[2.2, 2.2, 0.3]} />
+                <meshStandardMaterial color="#f2c230" />
+              </mesh>
+            )}
+            {b.kind === 'hospital' && (
+              <mesh position={[b.x, groundY(b.x, b.z) + b.h + 3.5, b.z]}>
+                <boxGeometry args={[3.5, 1.2, 0.35]} />
+                <meshStandardMaterial color="#e8eef4" emissive="#ffffff" emissiveIntensity={0.15} />
+              </mesh>
+            )}
+          </group>
+        );
+      })}
     </group>
   );
 }
@@ -677,11 +723,19 @@ export function DisasterLayer({ sim, ver }: { sim: Sim; ver: number }) {
               </group>
             );
           }
-          if (d.kind === 'flood') {
+          if (d.kind === 'flood' || d.kind === 'rain') {
             return (
               <mesh key={`w${i}-${rid}`} position={[x, y + 0.9, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
                 <boxGeometry args={[e.len, 1.2, 9]} />
-                <meshStandardMaterial color="#2f6f92" transparent opacity={0.5 * d.intensity} />
+                <meshStandardMaterial color={d.kind === 'rain' ? '#3a7a9a' : '#2f6f92'} transparent opacity={0.5 * d.intensity} />
+              </mesh>
+            );
+          }
+          if (d.kind === 'heat' || d.kind === 'blackout') {
+            return (
+              <mesh key={`h${i}-${rid}`} position={[x, y + 0.4, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
+                <boxGeometry args={[e.len, 0.3, 10]} />
+                <meshBasicMaterial color={d.kind === 'heat' ? '#e08040' : '#606878'} transparent opacity={0.35 * d.intensity} toneMapped={false} />
               </mesh>
             );
           }
@@ -790,16 +844,16 @@ export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolyg
       if (p.kind !== 'green' || p.ring.length < 3) continue;
       const area = ringArea(p.ring);
       if (area < 40) continue;
-      // gęstość: ~1 drzewo / 180 m² (Planty, parki), limit na poligon i globalnie
-      const nTree = Math.min(280, Math.max(1, Math.round(area / 180)));
-      const nBush = Math.min(220, Math.round(area / 140));
+      // gęstość obniżona pod płynność: ~1 drzewo / 320 m²
+      const nTree = Math.min(120, Math.max(1, Math.round(area / 320)));
+      const nBush = Math.min(80, Math.round(area / 280));
       let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (const [x, z] of p.ring) {
         minX = Math.min(minX, x); maxX = Math.max(maxX, x);
         minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
       }
       let placed = 0, tries = 0;
-      while (placed < nTree && trees.length < 4500 && tries < nTree * 8) {
+      while (placed < nTree && trees.length < 1800 && tries < nTree * 6) {
         tries++;
         const x = minX + rnd() * (maxX - minX), z = minZ + rnd() * (maxZ - minZ);
         if (!insideRing(p.ring, x, z)) continue;
@@ -807,7 +861,7 @@ export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolyg
         placed++;
       }
       placed = 0; tries = 0;
-      while (placed < nBush && bushes.length < 3200 && tries < nBush * 8) {
+      while (placed < nBush && bushes.length < 1000 && tries < nBush * 6) {
         tries++;
         const x = minX + rnd() * (maxX - minX), z = minZ + rnd() * (maxZ - minZ);
         if (!insideRing(p.ring, x, z)) continue;
@@ -857,15 +911,76 @@ export const Trees = memo(function Trees({ polygons, ver }: { polygons: SimPolyg
 
   return (
     <group>
-      <instancedMesh ref={trunk} args={[undefined, bark, Math.max(1, spots.trees.length)]} castShadow frustumCulled={false}>
-        <cylinderGeometry args={[0.16, 0.24, 2.8, 6]} />
+      <instancedMesh ref={trunk} args={[undefined, bark, Math.max(1, spots.trees.length)]} frustumCulled>
+        <cylinderGeometry args={[0.16, 0.24, 2.8, 5]} />
       </instancedMesh>
-      <instancedMesh ref={crown} args={[undefined, leaf, Math.max(1, spots.trees.length)]} castShadow frustumCulled={false}>
-        <icosahedronGeometry args={[1.9, 1]} />
+      <instancedMesh ref={crown} args={[undefined, leaf, Math.max(1, spots.trees.length)]} frustumCulled>
+        <icosahedronGeometry args={[1.9, 0]} />
       </instancedMesh>
-      <instancedMesh ref={bush} args={[undefined, scrub, Math.max(1, spots.bushes.length)]} castShadow frustumCulled={false}>
+      <instancedMesh ref={bush} args={[undefined, scrub, Math.max(1, spots.bushes.length)]} frustumCulled>
         <icosahedronGeometry args={[0.85, 0]} />
       </instancedMesh>
+    </group>
+  );
+});
+
+/** Czerwony mur granicy obszaru – poza nim pustka (mapa się nie psuje). */
+export const MapBorder = memo(function MapBorder({
+  area,
+}: {
+  area: { minLat: number; maxLat: number; minLon: number; maxLon: number; origin: { lat: number; lon: number } };
+}) {
+  const b = useMemo(() => {
+    const sw = toLocal(area.minLat, area.minLon);
+    const ne = toLocal(area.maxLat, area.maxLon);
+    const minX = Math.min(sw.x, ne.x), maxX = Math.max(sw.x, ne.x);
+    const minZ = Math.min(sw.z, ne.z), maxZ = Math.max(sw.z, ne.z);
+    return { minX, maxX, minZ, maxZ, cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2, w: maxX - minX, d: maxZ - minZ };
+  }, [area]);
+
+  const wallH = 32;
+  const thick = 5;
+  const mat = useMemo(() => new THREE.MeshStandardMaterial({
+    color: '#c62828',
+    emissive: '#7a1010',
+    emissiveIntensity: 0.22,
+    roughness: 0.85,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.88,
+  }), []);
+  const voidMat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#06080c' }), []);
+
+  // Ściany na krawędzi + czarne „void” poza mapą (4 płaskie pasy).
+  const voidPad = 2200;
+  return (
+    <group>
+      {/* N / S / E / W – czerwony mur */}
+      <mesh position={[b.cx, wallH / 2, b.minZ]} material={mat}>
+        <boxGeometry args={[b.w + thick, wallH, thick]} />
+      </mesh>
+      <mesh position={[b.cx, wallH / 2, b.maxZ]} material={mat}>
+        <boxGeometry args={[b.w + thick, wallH, thick]} />
+      </mesh>
+      <mesh position={[b.minX, wallH / 2, b.cz]} material={mat}>
+        <boxGeometry args={[thick, wallH, b.d + thick]} />
+      </mesh>
+      <mesh position={[b.maxX, wallH / 2, b.cz]} material={mat}>
+        <boxGeometry args={[thick, wallH, b.d + thick]} />
+      </mesh>
+      {/* Poza granicą – czarna pustka */}
+      <mesh position={[b.cx, -0.5, b.minZ - voidPad / 2]} material={voidMat} rotation-x={-Math.PI / 2}>
+        <planeGeometry args={[b.w + voidPad * 2, voidPad]} />
+      </mesh>
+      <mesh position={[b.cx, -0.5, b.maxZ + voidPad / 2]} material={voidMat} rotation-x={-Math.PI / 2}>
+        <planeGeometry args={[b.w + voidPad * 2, voidPad]} />
+      </mesh>
+      <mesh position={[b.minX - voidPad / 2, -0.5, b.cz]} material={voidMat} rotation-x={-Math.PI / 2}>
+        <planeGeometry args={[voidPad, b.d]} />
+      </mesh>
+      <mesh position={[b.maxX + voidPad / 2, -0.5, b.cz]} material={voidMat} rotation-x={-Math.PI / 2}>
+        <planeGeometry args={[voidPad, b.d]} />
+      </mesh>
     </group>
   );
 });

@@ -7,6 +7,7 @@ import type { Origin, RoadState, SourceStatus, TrafficState } from '../types';
 import { distToSegment } from '../../simulation/city/catalog';
 import { REFRESH, SOURCES } from '../config';
 import { toLatLon } from '../geo';
+import { generateInfill } from '../infill';
 import { cachedEnvironment } from '../sources/environment/live';
 import { snapshotToVehicles } from '../sources/mpk/live';
 
@@ -118,6 +119,9 @@ export function buildCityData(b: BakedBundle): CityData {
     });
   }
   const polygons: SimPolygon[] = b.city.polygons.map((p) => ({ ring: p.ring, kind: p.kind }));
+  const osmCount = buildings.length;
+  const infill = generateInfill(buildings, b.city.nodes, network.roads, polygons, 420);
+  buildings.push(...infill);
   const pois = (b.city.pois ?? []).map((p) => ({ name: p.name, category: p.category, x: p.x, z: p.z }));
 
   const traffic: TrafficState = {
@@ -145,7 +149,8 @@ export function buildCityData(b: BakedBundle): CityData {
       dataTimestamp: b.city.generatedAt,
       fetchedAt: b.city.generatedAt,
       records: b.city.roads.length,
-      note: `Drogi: ${roadCount}${network.duplicates ? ` (usunięto ${network.duplicates} duplikatów, dociągnięto ${network.snapped} końców)` : ''}, budynki: ${buildings.length}`
+      note: `Drogi: ${roadCount}${network.duplicates ? ` (usunięto ${network.duplicates} duplikatów, dociągnięto ${network.snapped} końców)` : ''}, budynki OSM: ${osmCount}`
+        + (infill.length ? ` + ${infill.length} uzupełnień (SIMULATED)` : '')
         + (trimmed || dropped ? ` (przyciętych do pasa drogowego: ${trimmed}, odrzuconych: ${dropped})` : '')
         + `, skrzyżowania: ${b.city.signals.length}, miejsca: ${pois.length}.`,
     },

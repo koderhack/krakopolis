@@ -20,10 +20,21 @@ export type BuildId =
   | 'school'
   | 'kindergarten'
   | 'hospital'
+  | 'industrial'
   | 'park'
-  | 'parking';
+  | 'parking'
+  | 'mall'
+  | 'university';
 
-export type BuildGroup = 'Mieszkania' | 'Usługi' | 'Zieleń i infrastruktura';
+export type BuildGroup =
+  | 'Mieszkalne'
+  | 'Usługi'
+  | 'Edukacja'
+  | 'Zdrowie'
+  | 'Transport'
+  | 'Infrastruktura'
+  | 'Rekreacja'
+  | 'Inne';
 
 export interface BuildSpec {
   id: BuildId;
@@ -42,24 +53,31 @@ export interface BuildSpec {
   jobs: number;
   /** Czy ma sens rotować (parking i park – nie). */
   rotatable: boolean;
+  /** Generowany ruch (0..1) – do obserwacji. */
+  trafficFactor: number;
   desc: string;
 }
 
 export const CATALOG: BuildSpec[] = [
-  { id: 'home', label: 'Dom jednorodzinny', group: 'Mieszkania', w: 13, d: 11, h: 7.5, cost: 110, color: '#e6d7bf', roof: '#a45a45', residents: 4, jobs: 0, rotatable: true, desc: 'Niski dom z dachem, 4 mieszkańców' },
-  { id: 'small-block', label: 'Mały blok', group: 'Mieszkania', w: 24, d: 17, h: 12, cost: 240, color: '#dfd2c4', roof: '#8d6b57', residents: 11, jobs: 1, rotatable: true, desc: 'Kamienica, 3 kondygnacje' },
-  { id: 'apartment-block', label: 'Blok mieszkalny', group: 'Mieszkania', w: 36, d: 21, h: 21, cost: 520, color: '#d9cfc0', roof: '#6f7d8c', residents: 28, jobs: 2, rotatable: true, desc: '6–7 kondygnacji, 28 mieszkańców' },
-  { id: 'highrise', label: 'Duży blok mieszkalny', group: 'Mieszkania', w: 28, d: 28, h: 48, cost: 980, color: '#cfd6dc', roof: '#5a6874', residents: 44, jobs: 4, rotatable: true, desc: 'Wieżowiec, 44 mieszkańców' },
-  { id: 'office', label: 'Biurowiec', group: 'Usługi', w: 32, d: 25, h: 34, cost: 760, color: '#c9d3da', roof: '#41505c', residents: 0, jobs: 34, rotatable: true, desc: 'Bianki, 34 miejsca pracy' },
-  { id: 'shop', label: 'Sklep', group: 'Usługi', w: 19, d: 15, h: 6.5, cost: 280, color: '#e3d8c6', roof: '#c07a4a', residents: 0, jobs: 9, rotatable: true, desc: 'Lokal usługowy' },
-  { id: 'school', label: 'Szkoła', group: 'Usługi', w: 42, d: 19, h: 10, cost: 560, color: '#dcd0b4', roof: '#8a5f4a', residents: 0, jobs: 16, rotatable: true, desc: 'Szkoła podstawowa' },
-  { id: 'kindergarten', label: 'Przedszkole', group: 'Usługi', w: 21, d: 15, h: 6, cost: 320, color: '#e8ddc6', roof: '#c98a4b', residents: 0, jobs: 7, rotatable: true, desc: 'Żłobek i przedszkole' },
-  { id: 'hospital', label: 'Szpital', group: 'Usługi', w: 46, d: 31, h: 25, cost: 1250, color: '#dfe4e8', roof: '#7d94a3', residents: 0, jobs: 64, rotatable: true, desc: 'Szpital, 64 miejsca pracy' },
-  { id: 'park', label: 'Park', group: 'Zieleń i infrastruktura', w: 48, d: 48, h: 0.7, cost: 130, color: '#6fa055', roof: '#4d7a3a', residents: 0, jobs: 0, rotatable: false, desc: 'Zieleń, miejsce do spacerów' },
-  { id: 'parking', label: 'Parking', group: 'Zieleń i infrastruktura', w: 36, d: 27, h: 0.5, cost: 160, color: '#9aa0a6', roof: '#7d838a', residents: 0, jobs: 0, rotatable: true, desc: 'Parking przy osiedlu' },
+  { id: 'home', label: 'Dom jednorodzinny', group: 'Mieszkalne', w: 13, d: 11, h: 7.5, cost: 110 * 10_000, color: '#e6d7bf', roof: '#a45a45', residents: 4, jobs: 0, rotatable: true, trafficFactor: 0.15, desc: 'Niski dom z dachem, 4 mieszkańców' },
+  { id: 'small-block', label: 'Mały blok / kamienica', group: 'Mieszkalne', w: 24, d: 17, h: 12, cost: 240 * 10_000, color: '#dfd2c4', roof: '#8d6b57', residents: 11, jobs: 1, rotatable: true, trafficFactor: 0.35, desc: 'Kamienica, 3 kondygnacje' },
+  { id: 'apartment-block', label: 'Blok mieszkalny', group: 'Mieszkalne', w: 36, d: 21, h: 21, cost: 520 * 10_000, color: '#d9cfc0', roof: '#6f7d8c', residents: 28, jobs: 2, rotatable: true, trafficFactor: 0.55, desc: '6–7 kondygnacji, 28 mieszkańców' },
+  { id: 'highrise', label: 'Wysoki blok', group: 'Mieszkalne', w: 28, d: 28, h: 48, cost: 980 * 10_000, color: '#cfd6dc', roof: '#5a6874', residents: 44, jobs: 4, rotatable: true, trafficFactor: 0.7, desc: 'Wieżowiec, 44 mieszkańców' },
+  { id: 'office', label: 'Biurowiec', group: 'Usługi', w: 32, d: 25, h: 34, cost: 760 * 10_000, color: '#c9d3da', roof: '#41505c', residents: 0, jobs: 34, rotatable: true, trafficFactor: 0.65, desc: '34 miejsca pracy' },
+  { id: 'shop', label: 'Sklep', group: 'Usługi', w: 19, d: 15, h: 6.5, cost: 280 * 10_000, color: '#e3d8c6', roof: '#c07a4a', residents: 0, jobs: 9, rotatable: true, trafficFactor: 0.4, desc: 'Lokal usługowy' },
+  { id: 'mall', label: 'Centrum handlowe', group: 'Usługi', w: 78, d: 66, h: 14, cost: 420 * 10_000, color: '#c8b7a0', roof: '#4a6a8a', residents: 0, jobs: 48, rotatable: true, trafficFactor: 0.85, desc: 'Duży obiekt handlowy' },
+  { id: 'school', label: 'Szkoła', group: 'Edukacja', w: 42, d: 19, h: 10, cost: 560 * 10_000, color: '#dcd0b4', roof: '#8a5f4a', residents: 0, jobs: 16, rotatable: true, trafficFactor: 0.45, desc: 'Szkoła podstawowa' },
+  { id: 'kindergarten', label: 'Przedszkole', group: 'Edukacja', w: 21, d: 15, h: 6, cost: 320 * 10_000, color: '#e8ddc6', roof: '#c98a4b', residents: 0, jobs: 7, rotatable: true, trafficFactor: 0.3, desc: 'Żłobek i przedszkole' },
+  { id: 'university', label: 'Uczelnia', group: 'Edukacja', w: 62, d: 54, h: 22, cost: 380 * 10_000, color: '#d8cdb8', roof: '#7a5f8a', residents: 0, jobs: 40, rotatable: true, trafficFactor: 0.7, desc: 'Kampus / budynek dydaktyczny' },
+  { id: 'hospital', label: 'Szpital', group: 'Zdrowie', w: 46, d: 31, h: 25, cost: 1250 * 10_000, color: '#dfe4e8', roof: '#7d94a3', residents: 0, jobs: 64, rotatable: true, trafficFactor: 0.75, desc: '64 miejsca pracy' },
+  { id: 'parking', label: 'Parking', group: 'Transport', w: 36, d: 27, h: 0.5, cost: 160 * 10_000, color: '#9aa0a6', roof: '#7d838a', residents: 0, jobs: 0, rotatable: true, trafficFactor: 0.5, desc: 'Parking przy osiedlu' },
+  { id: 'industrial', label: 'Hala przemysłowa', group: 'Infrastruktura', w: 48, d: 32, h: 12, cost: 640 * 10_000, color: '#a8b0b8', roof: '#4a5058', residents: 0, jobs: 28, rotatable: true, trafficFactor: 0.6, desc: 'Magazyn / produkcja' },
+  { id: 'park', label: 'Park', group: 'Rekreacja', w: 48, d: 48, h: 0.7, cost: 130 * 10_000, color: '#6fa055', roof: '#4d7a3a', residents: 0, jobs: 0, rotatable: false, trafficFactor: 0.05, desc: 'Zieleń, miejsce do spacerów' },
 ];
 
-export const BUILD_GROUPS: BuildGroup[] = ['Mieszkania', 'Usługi', 'Zieleń i infrastruktura'];
+export const BUILD_GROUPS: BuildGroup[] = [
+  'Mieszkalne', 'Usługi', 'Edukacja', 'Zdrowie', 'Transport', 'Infrastruktura', 'Rekreacja', 'Inne',
+];
 
 const BY_ID = new Map(CATALOG.map((s) => [s.id, s]));
 export const buildSpec = (id: BuildId): BuildSpec => BY_ID.get(id) ?? CATALOG[0];
@@ -68,8 +86,8 @@ export const buildSpec = (id: BuildId): BuildSpec => BY_ID.get(id) ?? CATALOG[0]
 
 /** Domyślne stare typy (park/mall/university) przechodzą przez ten sam katalog. */
 export const LEGACY_SPECS: Record<string, { label: string; w: number; d: number; h: number; cost: number; color: string; roof: string }> = {
-  mall: { label: 'Nowe centrum handlowe', w: 78, d: 66, h: 14, cost: 420, color: '#c8b7a0', roof: '#4a6a8a' },
-  university: { label: 'Nowa uczelnia', w: 62, d: 54, h: 22, cost: 380, color: '#d8cdb8', roof: '#7a5f8a' },
+  mall: { label: 'Nowe centrum handlowe', w: 78, d: 66, h: 14, cost: 420 * 10_000, color: '#c8b7a0', roof: '#4a6a8a' },
+  university: { label: 'Nowa uczelnia', w: 62, d: 54, h: 22, cost: 380 * 10_000, color: '#d8cdb8', roof: '#7a5f8a' },
 };
 
 /* --------------------------------------------------------------- geometria */

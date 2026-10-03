@@ -10,8 +10,11 @@
  * Krakowa, tylko wirtualny model.
  */
 import { mulberry32 } from '../traffic/assignment';
+import type { BuildId } from './catalog';
 
 export type RoadClosure = 'none' | 'closed' | 'cars-only' | 'destroyed';
+
+export type DisasterKind = 'fire' | 'flood' | 'blackout' | 'earthquake' | 'heat' | 'rain';
 
 export interface PlayerBuilding {
   id: number;
@@ -20,12 +23,18 @@ export interface PlayerBuilding {
   w: number;
   d: number;
   h: number;
-  kind: 'mall' | 'university';
+  /** Obrót w radianach (oś Y). */
+  rot?: number;
+  kind: BuildId;
   name: string;
+  color: string;
+  roof: string;
+  residents: number;
+  jobs: number;
 }
 
 export interface DisasterState {
-  kind: 'fire' | 'flood' | 'blackout' | 'earthquake';
+  kind: DisasterKind;
   /** Odcinki objęte skutkiem (zamknięte lub zniszczone). */
   roads: number[];
   /** Bieżąca intensywność 0..1 – maleje z czasem przy pożarze i powodzi. */
@@ -33,6 +42,9 @@ export interface DisasterState {
   startedAt: number;
   /** Opis skutków pokazywany w UI. */
   label: string;
+  /** Epicentrum (do podglądu / minimapy). */
+  cx?: number;
+  cz?: number;
 }
 
 export interface NewStop {
@@ -61,33 +73,46 @@ const rnd = mulberry32(4242);
 
 export class PlayerHistory {
   private stack: UndoAction[] = [];
+  private redoStack: UndoAction[] = [];
   limit = 40;
 
   push(a: UndoAction) {
     this.stack.push(a);
     if (this.stack.length > this.limit) this.stack.shift();
+    this.redoStack.length = 0;
   }
   get canUndo() { return this.stack.length > 0; }
+  get canRedo() { return this.redoStack.length > 0; }
   get depth() { return this.stack.length; }
   get lastLabel() { return this.stack[this.stack.length - 1]?.label ?? ''; }
   undo(): string | null {
     const a = this.stack.pop();
     if (!a) return 'Nie ma czego cofać.';
     a.revert();
+    this.redoStack.push(a);
     return `Cofnięto: ${a.label}.`;
   }
-  clear() { this.stack.length = 0; }
+  redo(): string | null {
+    const a = this.redoStack.pop();
+    if (!a) return 'Nie ma czego ponowić.';
+    a.apply();
+    this.stack.push(a);
+    return `Ponowiono: ${a.label}.`;
+  }
+  clear() { this.stack.length = 0; this.redoStack.length = 0; }
   list(): { label: string; at: string }[] {
     return this.stack.map((a) => ({ label: a.label, at: new Date(a.at).toLocaleTimeString('pl-PL') }));
   }
 }
 
-/** Nazwy katastrof i ich koszt w budżecie gry. */
+/** Nazwy katastrof / scenariuszy i koszt w budżecie (zł). */
 export const DISASTERS = {
-  fire: { label: 'Pożar', cost: 90 },
-  flood: { label: 'Powódź', cost: 130 },
-  blackout: { label: 'Blackout', cost: 70 },
-  earthquake: { label: 'Trzęsienie ziemi', cost: 160 },
+  fire: { label: 'Pożar', cost: 900_000, radius: 220, count: 2 },
+  flood: { label: 'Powódź', cost: 1_300_000, radius: 500, count: 7 },
+  blackout: { label: 'Awaria infrastruktury', cost: 700_000, radius: 320, count: 3 },
+  earthquake: { label: 'Przeciążenie transportu', cost: 1_600_000, radius: 700, count: 9 },
+  heat: { label: 'Fala upałów', cost: 550_000, radius: 900, count: 4 },
+  rain: { label: 'Ekstremalne opady', cost: 1_100_000, radius: 550, count: 6 },
 } as const;
 
 /** Efekty katastrof na metryki – jawnie odseparowane od danych. */
@@ -96,9 +121,9 @@ export const DISASTER_EFFECTS = {
   flood: { satisfaction: -11, pollution: +6, noise: +4, speed: 0.72 },
   blackout: { satisfaction: -8, pollution: +2, noise: -8, speed: 0.86 },
   earthquake: { satisfaction: -18, pollution: +14, noise: +16, speed: 0.8 },
+  heat: { satisfaction: -10, pollution: +8, noise: -2, speed: 0.88 },
+  rain: { satisfaction: -9, pollution: +4, noise: +3, speed: 0.75 },
 } as const;
-
-export type DisasterKind = keyof typeof DISASTERS;
 
 /** Wpływ aktywnych katastrof na bieżący ruch i zadowolenie. */
 export function disasterPenalty(active: DisasterState[]): { speed: number; satisfaction: number; pollution: number; noise: number } {

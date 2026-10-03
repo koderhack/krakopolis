@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { COST, type Sim } from '../simulation/sim';
 import type { CityData } from '../data/model';
-import type { FleetPose, Sel, Tool, TrafficView } from '../scene/types';
+import type { FleetPose, Sel, Tool, TrafficView, PendingBuild } from '../scene/types';
 import { LAYERS } from '../scene/layers';
 import { DISASTERS, type DisasterKind } from '../simulation/city/player';
 import type { PipelineSnapshot } from '../data/pipeline';
@@ -10,6 +10,11 @@ import type { Origin } from '../data/types';
 import { formatCoords } from '../data/adapters/cityAdapter';
 import { buildIndex, search, KIND_LABEL, type Place } from '../scene/search';
 import type { PlaceRef } from '../scene/types';
+import { BUILD_GROUPS, CATALOG, type BuildId } from '../simulation/city/catalog';
+import type { ConsequenceReport } from '../simulation/consequences';
+import type { CityVersion } from '../data/cityStore';
+import { compareVersions } from '../data/cityStore';
+import { formatBudgetPln, KRAKOW_BUDGET_2025 } from '../data/budget';
 
 interface Props {
   sim: Sim;
@@ -17,6 +22,15 @@ interface Props {
   ver: number;
   sel: Sel;
   tool: Tool;
+  buildId: BuildId | null;
+  setBuildId: (id: BuildId | null) => void;
+  pending: PendingBuild | null;
+  report: ConsequenceReport | null;
+  versions: CityVersion[];
+  onConfirmPending: () => void;
+  onCancelPending: () => void;
+  onDismissReport: () => void;
+  onRestoreVersion: (id: number) => void;
   paused: boolean;
   speed: number;
   trafficView: TrafficView;
@@ -76,30 +90,53 @@ const CHANGE_LABEL: Record<string, string> = {
 
 /* ------------------------------------------------------------ wyszukiwarka */
 
-function SearchBox({ city, goto }: { city: CityData; goto: Props['goto'] }) {
+function SearchBox({
+  city, goto, topOffset, collapsed, setCollapsed,
+}: {
+  city: CityData;
+  goto: Props['goto'];
+  topOffset?: boolean;
+  collapsed: boolean;
+  setCollapsed: (v: boolean) => void;
+}) {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
   const index = useMemo(() => buildIndex(city), [city]);
   const results = useMemo(() => (q.length >= 2 ? search(index, q) : []), [index, q]);
+  const style = topOffset ? { top: 44 } : undefined;
 
   const pick = (p: Place) => {
     goto(p.x, p.z, p.ref as PlaceRef | undefined);
     setOpen(false);
   };
 
+  if (collapsed) return null;
+
   return (
-    <div className="search">
-      <input
-        value={q}
-        placeholder="Szukaj: Poczta Główna, Rynek, Wawel, linia 18…"
-        onChange={(e) => { setQ(e.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => window.setTimeout(() => setOpen(false), 180)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && results[0]) pick(results[0]);
-          if (e.key === 'Escape') { setOpen(false); (e.target as HTMLInputElement).blur(); }
-        }}
-      />
+    <div className="search" style={style}>
+      <div className="search-bar">
+        <input
+          value={q}
+          placeholder="Szukaj: Poczta Główna, Rynek, Wawel, linia 18…"
+          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => window.setTimeout(() => setOpen(false), 180)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && results[0]) pick(results[0]);
+            if (e.key === 'Escape') { setOpen(false); setCollapsed(true); (e.target as HTMLInputElement).blur(); }
+          }}
+        />
+        <button
+          type="button"
+          className="search-collapse"
+          title="Ukryj wyszukiwarkę"
+          aria-label="Ukryj wyszukiwarkę"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => { setCollapsed(true); setOpen(false); }}
+        >
+          Ukryj
+        </button>
+      </div>
       {open && results.length > 0 && (
         <ul>
           {results.map((p, i) => (
@@ -308,10 +345,134 @@ function EnvironmentCard({ city }: { city: CityData }) {
   );
 }
 
+/* ------------------------------------------------ konsekwencje / katalog */
+
+function ConsequencePanel({
+  report, pending, onConfirm, onCancel, onDismiss,
+}: {
+  report: ConsequenceReport;
+  pending: PendingBuild | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <aside className="panel consequence">
+      <h2>{report.title}</h2>
+      <p className="sub">{report.summary}</p>
+      <div className="impact-grid">
+        {report.impacts.map((row) => (
+          <div key={row.label} className={`impact lvl-${row.level.toLowerCase()}`}>
+            <span>{row.label}</span>
+            <b>{row.level}</b>
+            {row.delta && <em>{row.delta}</em>}
+          </div>
+        ))}
+      </div>
+      <h3 className="obs-h">Obserwacje <small>szacunek modelu</small></h3>
+      <ul className="obs-list">
+        {report.observations.map((o, i) => (
+          <li key={i} className={`obs-${o.kind}`}>
+            {o.text}
+            <small>pewność: {o.confidence}</small>
+          </li>
+        ))}
+      </ul>
+      <div className="horizons">
+        {report.horizons.map((h) => (
+          <div key={h.label}><b>{h.label}</b><span>{h.note}</span></div>
+        ))}
+      </div>
+      {pending ? (
+        <div className="acts confirm-acts">
+          <button className="primary" onClick={onConfirm}>Zatwierdź zmianę</button>
+          <button onClick={onCancel}>Anuluj</button>
+        </div>
+      ) : (
+        <div className="acts">
+          <button onClick={onDismiss}>Zamknij</button>
+        </div>
+      )}
+      <p className="note">Wyniki to SIMULATED / szacunek modelu – nie „AI predictions”.</p>
+    </aside>
+  );
+}
+
+function CatalogPanel({
+  buildId, setBuildId, open, setOpen,
+}: {
+  buildId: BuildId | null;
+  setBuildId: (id: BuildId | null) => void;
+  open: boolean;
+  setOpen: (v: boolean) => void;
+}) {
+  if (!open) return null;
+  return (
+    <aside className="panel catalog">
+      <h2>Zbuduj <small>katalog</small></h2>
+      <p className="sub">Wybierz typ → kliknij mapę → zatwierdź</p>
+      {BUILD_GROUPS.map((g) => (
+        <div key={g} className="cat-group">
+          <h3>{g}</h3>
+          {CATALOG.filter((c) => c.group === g).map((c) => (
+            <button
+              key={c.id}
+              className={buildId === c.id ? 'on' : ''}
+              onClick={() => { setBuildId(c.id); setOpen(false); }}
+              title={c.desc}
+            >
+              <i className="swatch" style={{ background: c.color }} />
+              <span>{c.label}</span>
+              <small>{formatBudgetPln(c.cost)}</small>
+            </button>
+          ))}
+        </div>
+      ))}
+    </aside>
+  );
+}
+
+function HistoryPanel({ versions, onRestore }: { versions: CityVersion[]; onRestore: (id: number) => void }) {
+  const recent = versions.slice(-8).reverse();
+  const [cmp, setCmp] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (versions.length < 2) { setCmp(null); return; }
+      const a = versions[versions.length - 2];
+      const b = versions[versions.length - 1];
+      const d = await compareVersions(a.id, b.id);
+      if (!alive || !d) return;
+      const x = d.delta;
+      setCmp(`v${a.id}→v${b.id}: mieszkańcy ${x.residents >= 0 ? '+' : ''}${x.residents}, praca ${x.jobs >= 0 ? '+' : ''}${x.jobs}, budżet ${x.budget >= 0 ? '+' : ''}${Math.round(x.budget)}, budynki ${x.buildings >= 0 ? '+' : ''}${x.buildings}`);
+    })();
+    return () => { alive = false; };
+  }, [versions]);
+  if (!recent.length) return null;
+  return (
+    <aside className="changes history">
+      <h3>Historia miasta <small>IndexedDB</small></h3>
+      {cmp && <p className="cmp-line">{cmp}</p>}
+      {recent.map((v) => (
+        <div key={v.id} className="chg">
+          <span>v{v.id} · {v.label}</span>
+          <em>{new Date(v.createdAt).toLocaleString('pl-PL', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}</em>
+          {v.id < (versions[versions.length - 1]?.id ?? 0) && (
+            <button type="button" className="mini" onClick={() => onRestore(v.id)} title="Nowa wersja z tego stanu">Przywróć</button>
+          )}
+        </div>
+      ))}
+      <p className="dp-note">Przywrócenie tworzy nową wersję – historia zostaje.</p>
+    </aside>
+  );
+}
+
 /* ------------------------------------------------------------------- HUD */
 
 export function Hud({
-  sim, city, sel, tool, paused, speed, trafficView, msg, pipe, flyMode, vehicle, goto,
+  sim, city, sel, tool, buildId, setBuildId, pending, report, versions,
+  onConfirmPending, onCancelPending, onDismissReport, onRestoreVersion,
+  paused, speed, trafficView, msg, pipe, flyMode, vehicle, goto,
   layers, toggleLayer, disaster, setDisaster, roadFrom, setTool, topDown, setTopDown,
   setPaused, setSpeed, setTrafficView, setFlyMode, setVehicle, act,
 }: Props) {
@@ -319,9 +480,18 @@ export function Hud({
   const [toast, setToast] = useState('');
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [topCollapsed, setTopCollapsed] = useState(false);
+  const [bottomCollapsed, setBottomCollapsed] = useState(false);
+  const [searchCollapsed, setSearchCollapsed] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [clockOpen, setClockOpen] = useState(false);
+  const [clockOffsetUi, setClockOffsetUi] = useState(0);
 
   useEffect(() => {
-    const t = setInterval(() => setS(sim.snapshot()), 400);
+    const t = setInterval(() => {
+      setS(sim.snapshot());
+      setClockOffsetUi(sim.clockOffsetHours());
+    }, 400);
     return () => clearInterval(t);
   }, [sim]);
   useEffect(() => {
@@ -356,40 +526,126 @@ export function Hud({
   ] : [];
 
   const changes = sim.playerChanges();
+  const selectedSpec = buildId ? CATALOG.find((c) => c.id === buildId) : null;
 
   return (
     <>
-      <header className="top">
-        <div className="brand">
-          <b>SimCity Kraków</b>
-          <span>3D z prawdziwymi danymi OSM + ZTP</span>
-        </div>
-        <div className="metrics">
-          {METRICS.map((m) => (
-            <div key={m.k} className="metric">
-              <span>{m.label}</span>
-              <strong>{Math.round(s[m.k])}</strong>
-              <Bar v={s[m.k]} bad={m.bad} />
+      <header className={`top${topCollapsed ? ' collapsed' : ''}`}>
+        {!topCollapsed && (
+          <>
+            <div className="brand">
+              <b>SimCity Kraków</b>
+              <span>3D z prawdziwymi danymi OSM + ZTP</span>
             </div>
-          ))}
-          <div className="metric"><span>Budżet</span><strong>{Math.round(s.budget).toLocaleString('pl-PL')} zł</strong></div>
-        </div>
-        <div className="ctrl">
-          <div className="sim-clock" title={s.weekend ? 'Weekend · Europe/Warsaw' : 'Dzień roboczy · Europe/Warsaw'}>
-            <span className="sim-clock-label">Czas</span>
-            <strong className="sim-clock-time">{s.clock}</strong>
-            <span className="sim-clock-meta">{speed === 1 && !paused ? 'na żywo' : paused ? 'pauza' : `${speed}×`}</span>
-          </div>
-          <button className={paused ? '' : 'on'} onClick={() => setPaused(!paused)}>{paused ? 'Play' : 'Pauza'}</button>
-          {[1, 2, 5].map((n) => <button key={n} className={speed === n ? 'on' : ''} onClick={() => setSpeed(n)}>{n}×</button>)}
-          <button className={topDown ? 'on' : ''} onClick={() => setTopDown(!topDown)} title="Perspektywa: z góry albo poziomo z ulicy">Perspektywa</button>
-          <button className={flyMode ? 'on' : ''} onClick={() => setFlyMode(!flyMode)} title="Tryb lotu: WASD, Q/E góra-dół, mysz rozglądanie, Shift przyspieszenie">
-            Tryb lotu
-          </button>
-        </div>
+            <div className="metrics">
+              {METRICS.map((m) => (
+                <div key={m.k} className="metric">
+                  <span>{m.label}</span>
+                  <strong>{Math.round(s[m.k])}</strong>
+                  <Bar v={s[m.k]} bad={m.bad} />
+                </div>
+              ))}
+              <div className="metric" title={`Fundusz inwestycyjny obszaru · baseline z budżetu Krakowa ${KRAKOW_BUDGET_2025.year} (${KRAKOW_BUDGET_2025.origin})`}>
+                <span>Budżet</span>
+                <strong>{formatBudgetPln(s.budget)}</strong>
+              </div>
+            </div>
+            <div className="ctrl">
+              <div className={`sim-clock${clockOpen ? ' open' : ''}`}>
+                <button
+                  type="button"
+                  className="sim-clock-btn"
+                  title="Kliknij, aby przewinąć czas ±24 h"
+                  onClick={() => setClockOpen((v) => !v)}
+                >
+                  <span className="sim-clock-label">Czas</span>
+                  <strong className="sim-clock-time">{s.clock}</strong>
+                  <span className="sim-clock-meta">
+                    {Math.abs(clockOffsetUi) < 0.02 && speed === 1 && !paused
+                      ? 'na żywo'
+                      : paused
+                        ? 'pauza'
+                        : `${clockOffsetUi >= 0 ? '+' : ''}${clockOffsetUi.toFixed(1)} h · ${speed}×`}
+                  </span>
+                </button>
+                {clockOpen && (
+                  <div className="clock-scrub" onClick={(e) => e.stopPropagation()}>
+                    <div className="clock-scrub-row">
+                      <button type="button" onClick={() => { sim.nudgeClockHours(-1); setClockOffsetUi(sim.clockOffsetHours()); }}>−1 h</button>
+                      <button type="button" onClick={() => { sim.resetClockToNow(); setClockOffsetUi(0); }}>Teraz</button>
+                      <button type="button" onClick={() => { sim.nudgeClockHours(1); setClockOffsetUi(sim.clockOffsetHours()); }}>+1 h</button>
+                    </div>
+                    <label className="clock-scrub-label">
+                      −24 h
+                      <input
+                        type="range"
+                        min={-24}
+                        max={24}
+                        step={0.25}
+                        value={clockOffsetUi}
+                        onChange={(e) => {
+                          const h = Number(e.target.value);
+                          sim.setClockOffsetHours(h);
+                          setClockOffsetUi(sim.clockOffsetHours());
+                        }}
+                      />
+                      +24 h
+                    </label>
+                    <p className="clock-scrub-hint">Flota MPK (SIMULATED) zależy od godziny. Live GTFS chowa się przy scrubbingu. 2×/5× też przesuwa zegar (max ±24 h).</p>
+                  </div>
+                )}
+              </div>
+              <button className={paused ? '' : 'on'} onClick={() => setPaused(!paused)}>{paused ? 'Play' : 'Pauza'}</button>
+              {[1, 2, 5].map((n) => <button key={n} className={speed === n ? 'on' : ''} onClick={() => setSpeed(n)}>{n}×</button>)}
+              <button className={topDown ? 'on' : ''} onClick={() => setTopDown(!topDown)} title="Perspektywa: z góry albo poziomo z ulicy">Perspektywa</button>
+              <button className={flyMode ? 'on' : ''} onClick={() => setFlyMode(!flyMode)} title="Tryb lotu: WASD, Q/E góra-dół, mysz rozglądanie, Shift przyspieszenie">
+                Tryb lotu
+              </button>
+            </div>
+          </>
+        )}
+        <button
+          type="button"
+          className="chrome-toggle top-chrome-toggle"
+          title={topCollapsed ? 'Rozwiń pasek górny' : 'Zwiń pasek górny'}
+          aria-label={topCollapsed ? 'Rozwiń pasek górny' : 'Zwiń pasek górny'}
+          onClick={() => { setTopCollapsed((v) => !v); setClockOpen(false); }}
+        >
+          {topCollapsed ? '▾ metryki' : '▴'}
+        </button>
       </header>
 
-      <SearchBox city={city} goto={goto} />
+      <SearchBox
+        city={city}
+        goto={goto}
+        topOffset={topCollapsed}
+        collapsed={searchCollapsed}
+        setCollapsed={setSearchCollapsed}
+      />
+
+      <div className="ui-dock" title="Pokaż / ukryj elementy UI">
+        <button
+          type="button"
+          className={searchCollapsed ? '' : 'on'}
+          onClick={() => setSearchCollapsed((v) => !v)}
+        >
+          {searchCollapsed ? 'Pokaż szukaj' : 'Ukryj szukaj'}
+        </button>
+        <button
+          type="button"
+          className={bottomCollapsed ? '' : 'on'}
+          onClick={() => setBottomCollapsed((v) => !v)}
+        >
+          {bottomCollapsed ? 'Pokaż narzędzia' : 'Ukryj narzędzia'}
+        </button>
+        <button
+          type="button"
+          className={topCollapsed ? '' : 'on'}
+          onClick={() => { setTopCollapsed((v) => !v); setClockOpen(false); }}
+        >
+          {topCollapsed ? 'Pokaż metryki' : 'Ukryj metryki'}
+        </button>
+      </div>
 
       <div className={`col left${leftCollapsed ? ' collapsed' : ''}`}>
         <button
@@ -419,6 +675,21 @@ export function Hud({
         </button>
         <div className="side-stack">
           <DonePanel sim={sim} />
+          {report && (
+            <ConsequencePanel
+              report={report}
+              pending={pending}
+              onConfirm={onConfirmPending}
+              onCancel={onCancelPending}
+              onDismiss={onDismissReport}
+            />
+          )}
+          <CatalogPanel
+            buildId={buildId}
+            setBuildId={setBuildId}
+            open={catalogOpen}
+            setOpen={setCatalogOpen}
+          />
           {vehicle && <VehicleCard vehicle={vehicle} city={city} setVehicle={setVehicle} />}
           {r && (
             <aside className="panel">
@@ -446,7 +717,7 @@ export function Hud({
                 <dd className={r.closed ? 'bad' : ''}>{status}</dd>
               </dl>
               <div className="acts">
-                {acts.map((a) => <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {a.cost} zł</small> : null}</button>)}
+                {acts.map((a) => <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {formatBudgetPln(a.cost)}</small> : null}</button>)}
               </div>
               <p className="note">Wartości „DANE ŹRÓDŁOWE” pochodzą z OSM/ZTP i nie zmieniają się przez grę.</p>
             </aside>
@@ -454,7 +725,11 @@ export function Hud({
           {b && (
             <aside className="panel">
               <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynk z OSM')}</h2>
-              <p className="sub">Obrys z OpenStreetMap · wysokość z tagów OSM</p>
+              <p className="sub">
+                {b.name === 'zabudowa uzupełniająca'
+                  ? 'SIMULATED – uzupełnienie pustych działek przy ulicach'
+                  : 'Obrys z OpenStreetMap · wysokość z tagów OSM'}
+              </p>
               <dl>
                 <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m</dd>
                 <dt>Obrys</dt><dd>{b.w.toFixed(0)} × {b.d.toFixed(0)} m</dd>
@@ -464,6 +739,7 @@ export function Hud({
             </aside>
           )}
           <EnvironmentCard city={city} />
+          <HistoryPanel versions={versions} onRestore={onRestoreVersion} />
           {changes.length > 0 && (
             <aside className="changes">
               <h3>Zmiany gracza <small>scenariusz</small></h3>
@@ -480,6 +756,7 @@ export function Hud({
         </div>
       </div>
 
+      {bottomCollapsed ? null : (
       <nav className="tools">
         <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')}>Zaznacz</button>
         <button
@@ -491,28 +768,35 @@ export function Hud({
         </button>
         <span className="toolsep" />
         {r && acts.map((a) => (
-          <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {a.cost} zł</small> : null}</button>
+          <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {formatBudgetPln(a.cost)}</small> : null}</button>
         ))}
         <span className="toolsep" />
+        <button
+          className={tool === 'build' || catalogOpen ? 'on' : ''}
+          onClick={() => {
+            if (tool === 'build' && catalogOpen) { setCatalogOpen(false); setTool('select'); setBuildId(null); }
+            else { setCatalogOpen(true); setTool('build'); }
+          }}
+        >
+          Zbuduj {selectedSpec ? <small>{selectedSpec.label}</small> : <small>katalog</small>}
+        </button>
         {([
           ['park', 'Park (koło)', COST.park],
           ['park-rect', 'Park (prostokąt)', COST.park],
           ['stop-bus', 'Przystanek autobusowy', COST.stop],
           ['stop-tram', 'Przystanek tramwajowy', COST.stopTram],
           ['tram-track', 'Torowisko', COST.road],
-          ['mall', 'Centrum handlowe', COST.mall],
-          ['university', 'Uczelnia', COST.university],
           ['road', 'Nowa droga', COST.road],
         ] as const).map(([k, label, cost]) => (
-          <button key={k} className={tool === k ? 'on' : ''} onClick={() => { setTool(tool === k ? 'select' : k); }}>
-            {label} <small>{cost} zł</small>
+          <button key={k} className={tool === k ? 'on' : ''} onClick={() => { setTool(tool === k ? 'select' : k); setCatalogOpen(false); }}>
+            {label} <small>{formatBudgetPln(cost)}</small>
           </button>
         ))}
         <button
           className={tool === 'disaster' ? 'on danger' : ''}
           onClick={() => setTool(tool === 'disaster' ? 'select' : 'disaster')}
         >
-          Katastrofa <small>{DISASTERS[disaster].cost} zł</small>
+          Katastrofa <small>{formatBudgetPln(DISASTERS[disaster].cost)}</small>
         </button>
         {tool === 'disaster' && (
           <select className="disaster-pick" value={disaster} onChange={(e) => setDisaster(e.target.value as DisasterKind)}>
@@ -527,30 +811,44 @@ export function Hud({
             {v === 'simulated' ? 'Kolor: symulacja' : v === 'baseline' ? 'Kolor: dane' : 'Kolor: predykcja'}
           </button>
         ))}
+        <button
+          type="button"
+          className="chrome-toggle bottom-chrome-toggle"
+          title="Ukryj pasek narzędzi"
+          onClick={() => setBottomCollapsed(true)}
+        >
+          Ukryj
+        </button>
       </nav>
+      )}
 
-      <div className="hint">
-        {tool === 'park' ? 'Kliknij w teren, aby posadzić park okrągły.'
-          : tool === 'park-rect' ? (roadFrom ? 'Kliknij przeciwległy róg prostokąta.' : 'Kliknij pierwszy róg prostokątnego parku.')
-            : tool === 'stop-bus' ? 'Kliknij przy ulicy, aby postawić przystanek autobusowy.'
-              : tool === 'stop-tram' ? 'Kliknij przy torowisku, aby postawić przystanek tramwajowy.'
-                : tool === 'tram-track' ? (roadFrom ? 'Kliknij drugi koniec torowiska.' : 'Kliknij początek nowego torowiska.')
-                  : tool === 'mall' ? 'Kliknij, aby wybudować centrum handlowe.'
-                    : tool === 'university' ? 'Kliknij, aby wybudować uczelnię.'
-                      : tool === 'road' ? (roadFrom ? 'Kliknij drugi koniec drogi.' : 'Kliknij pierwszy koniec drogi.')
-                        : tool === 'disaster' ? `Kliknij miejsce katastrofy: ${DISASTERS[disaster].label}.`
-                          : flyMode
-                            ? 'Tryb lotu: WASD / strzałki – ruch, Q i E – wysokość, mysz – rozglądanie, Shift – przyspieszenie, kółko – zbliżenie.'
-                            : r || b || vehicle ? '' : 'Kliknij ulicę, budynek albo pojazd MPK. Panele z boków zwijasz strzałkami ‹ ›.'}
-      </div>
+      {!bottomCollapsed && (
+        <div className="hint">
+          {pending ? 'Podgląd budowy – zatwierdź lub anuluj w panelu konsekwencji.'
+            : tool === 'build' ? (selectedSpec ? `Kliknij mapę, aby zaplanować: ${selectedSpec.label}.` : 'Wybierz typ budynku z katalogu.')
+              : tool === 'park' ? 'Kliknij w teren, aby posadzić park okrągły.'
+                : tool === 'park-rect' ? (roadFrom ? 'Kliknij przeciwległy róg prostokąta.' : 'Kliknij pierwszy róg prostokątnego parku.')
+                  : tool === 'stop-bus' ? 'Kliknij przy ulicy, aby postawić przystanek autobusowy.'
+                    : tool === 'stop-tram' ? 'Kliknij przy torowisku, aby postawić przystanek tramwajowy.'
+                      : tool === 'tram-track' ? (roadFrom ? 'Kliknij drugi koniec torowiska.' : 'Kliknij początek nowego torowiska.')
+                        : tool === 'road' ? (roadFrom ? 'Kliknij drugi koniec drogi.' : 'Kliknij pierwszy koniec drogi.')
+                          : tool === 'disaster' ? `Kliknij miejsce katastrofy: ${DISASTERS[disaster].label}.`
+                            : flyMode
+                              ? 'Tryb lotu: WASD / strzałki – ruch, Q i E – wysokość, mysz – rozglądanie, Shift – przyspieszenie, kółko – zbliżenie.'
+                              : r || b || vehicle ? '' : 'UI: pasek „Ukryj…” w prawym dolnym rogu.'}
+        </div>
+      )}
       {toast && <div className="toast">{toast}</div>}
 
-      <div className="foot">
-        <span className="sim">SIMULATED</span> {s.cars} aut, {s.trams} tramwajów, {s.buses} autobusów, {s.peds} pieszych ·
-        <span className="obs"> OBSERVED</span> {s.realVehicles} realnych pojazdów MPK ({s.realTrams} tram., {s.realBuses} autob.) ·
-        realnych przystanków {city.stops.length} · zmian gracza {changes.length} ·
-        predykcja przeliczona {formatAge(s.assignmentAt)}
-      </div>
+      {!bottomCollapsed && (
+        <div className="foot">
+          <span className="sim">SIMULATED</span> {s.cars} aut, {s.trams} tramwajów, {s.buses} autobusów, {s.peds} pieszych ·
+          <span className="obs"> OBSERVED</span> {s.realVehicles} realnych pojazdów MPK ({s.realTrams} tram., {s.realBuses} autob.) ·
+          realnych przystanków {city.stops.length} · zmian gracza {changes.length} ·
+          wersja miasta v{versions[versions.length - 1]?.id ?? 1} ·
+          predykcja przeliczona {formatAge(s.assignmentAt)}
+        </div>
+      )}
     </>
   );
 }

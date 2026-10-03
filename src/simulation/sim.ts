@@ -16,7 +16,9 @@ import {
   DISASTERS, DISASTER_EFFECTS, PlayerHistory, disasterPenalty, pickRoads,
   type DisasterKind, type DisasterState, type NewStop, type PlayerBuilding, type PlayerChange, type RoadClosure,
 } from './city/player';
+import { buildSpec, type BuildId } from './city/catalog';
 import type { Origin } from '../data/types';
+import { BUDGET_INCOME_PER_SIM_SEC, COST_SCALE, START_BUDGET_PLN } from '../data/budget';
 
 export const MAX_PEDS = 900;
 /**
@@ -30,16 +32,19 @@ export const MAX_PEDS = 900;
 export const VEH_PER_AGENT = 9;
 export const TICK = 0.1;
 export const COST = {
-  close: 20,
-  carsOnly: 30,
-  pedestrian: 150,
-  stop: 80,
-  stopTram: 110,
-  park: 120,
-  mall: 420,
-  university: 380,
-  road: 260,
+  close: 20 * COST_SCALE,
+  carsOnly: 30 * COST_SCALE,
+  pedestrian: 150 * COST_SCALE,
+  stop: 80 * COST_SCALE,
+  stopTram: 110 * COST_SCALE,
+  park: 120 * COST_SCALE,
+  mall: 420 * COST_SCALE,
+  university: 380 * COST_SCALE,
+  road: 260 * COST_SCALE,
 };
+
+/** Maks. przesunięcie zegara względem „teraz” (Europe/Warsaw). */
+export const MAX_CLOCK_OFFSET_MS = 24 * 60 * 60 * 1000;
 
 export interface RoadSim {
   edge: GraphEdge;
@@ -137,8 +142,10 @@ export class Sim {
    * rzeczywistym czasem Europe/Warsaw; przy 2×/5× przyspieszamy od tego punktu.
    */
   clockMs = Date.now();
+  /** Offset względem czasu ściennego – clamp ±24 h (scrubbing UI). */
+  clockOffsetMs = 0;
   version = 0;
-  m: Metrics = { traffic: 0, transit: 0, pedestrians: 0, pollution: 0, noise: 0, satisfaction: 60, budget: 1000 };
+  m: Metrics = { traffic: 0, transit: 0, pedestrians: 0, pollution: 0, noise: 0, satisfaction: 60, budget: START_BUDGET_PLN };
 
   private city: CityData | null = null;
   private routes: SimRoute[] = [];
@@ -335,14 +342,85 @@ export class Sim {
 
   /* ---------------------------------------------------------- symulacja */
 
-  /** Synchronizacja z zegarem ściennym (tryb 1×). */
+  /** Ostatni „kubeł” popytu (godzina×2 + pół godziny) – flota MPK tylko przy zmianie. */
+  private lastDemandBucket = -1;
+
+  /** Synchronizacja z zegarem ściennym (tryb 1×) – zachowuje offset ±24 h. */
   syncClockToWall() {
-    this.clockMs = Date.now();
+    this.clockMs = Date.now() + this.clockOffsetMs;
+    this.applyClockDemand(false);
   }
 
-  /** Przyspieszenie zegara (tryb 2×/5×): dt w sekundach symulacji. */
+  /** Przyspieszenie zegara (tryb 2×/5×): dt w sekundach symulacji, clamp ±24 h. */
   advanceClock(dtSec: number) {
-    this.clockMs += dtSec * 1000;
+    this.clockOffsetMs = clamp(
+      this.clockOffsetMs + dtSec * 1000,
+      -MAX_CLOCK_OFFSET_MS,
+      MAX_CLOCK_OFFSET_MS,
+    );
+    this.clockMs = Date.now() + this.clockOffsetMs;
+    this.applyClockDemand(false);
+  }
+
+  /** Przesunięcie zegara o godziny (scrubbing). */
+  nudgeClockHours(deltaH: number) {
+    this.setClockOffsetHours(this.clockOffsetMs / 3_600_000 + deltaH);
+  }
+
+  /** Ustaw offset w godzinach względem „teraz” (−24…+24). */
+  setClockOffsetHours(hours: number) {
+    this.clockOffsetMs = clamp(hours * 3_600_000, -MAX_CLOCK_OFFSET_MS, MAX_CLOCK_OFFSET_MS);
+    this.clockMs = Date.now() + this.clockOffsetMs;
+    this.applyClockDemand(true);
+  }
+
+  /** Reset do czasu rzeczywistego. */
+  resetClockToNow() {
+    this.clockOffsetMs = 0;
+    this.clockMs = Date.now();
+    this.applyClockDemand(true);
+  }
+
+  /**
+   * Przelicza flotę MPK i pieszych wg godziny zegara.
+   * force=true przy scrubbingu (od razu, także na pauzie).
+   */
+  applyClockDemand(force = false) {
+    const { hour, minute } = this.clockParts();
+    const bucket = hour * 2 + (minute >= 30 ? 1 : 0);
+    if (!force && bucket === this.lastDemandBucket) return;
+    this.lastDemandBucket = bucket;
+
+    this.retargetTransit();
+    this.enforceTransitCaps();
+    this.respawnTransit();
+
+    // Piesi: przy skoku zegara doganiamy target od razu (metrics() idzie po ±18).
+    const demand = this.transitDemandFactor();
+    let pedLen = 0, closedLen = 0;
+    for (const r of this.roads) {
+      if (r.pedestrian) pedLen += r.edge.len;
+      if (r.closed || r.closure === 'closed' || r.destroyed) closedLen += r.edge.len;
+    }
+    const np = this.parks.length;
+    const pedTarget = Math.max(
+      Math.max(40, Math.round(80 * demand)),
+      Math.min(
+        MAX_PEDS,
+        (120 + pedLen / 5 + closedLen / 8 + np * 24 + this.stops.length * 0.35) * (0.35 + 0.85 * demand),
+      ),
+    );
+    const old = Math.round(this.activePeds);
+    if (force) this.activePeds = pedTarget;
+    else this.activePeds += Math.max(-40, Math.min(40, pedTarget - this.activePeds));
+    const now = Math.round(this.activePeds);
+    for (let i = Math.min(old, now); i < now && i < MAX_PEDS; i++) {
+      this.peds_.place(this.peds[i], this.pickPedEdge());
+    }
+  }
+
+  clockOffsetHours(): number {
+    return this.clockOffsetMs / 3_600_000;
   }
 
   /** Części czasu w Europe/Warsaw. */
@@ -433,11 +511,7 @@ export class Sim {
     for (let i = 0; i < active; i++) this.peds_.step(this.peds[i], dt);
 
     if (this.tickN % 10 === 0) this.metrics();
-    if (this.tickN % 120 === 0) {
-      this.retargetTransit();
-      this.enforceTransitCaps();
-      this.respawnTransit();
-    }
+    if (this.tickN % 120 === 0) this.applyClockDemand(true);
     // Pojazdy, które wyjechały poza obszar, znikają.
     if (this.tickN % 30 === 0) this.cullOutsideArea();
     this.tickDisasters(dt);
@@ -876,7 +950,7 @@ export class Sim {
     this.m = {
       traffic, transit, pedestrians, pollution, noise,
       satisfaction: m.satisfaction + (satT - m.satisfaction) * 0.1,
-      budget: m.budget + 1.4 + m.satisfaction * 0.03 + pedestrians * 0.02 - this.stops.length * 0.02 - np * 0.08,
+      budget: m.budget + BUDGET_INCOME_PER_SIM_SEC + m.satisfaction * 0.4 + pedestrians * 0.25 - this.stops.length * 0.2 - np * 0.8,
     };
   }
 
@@ -1136,25 +1210,29 @@ export class Sim {
     return null;
   }
 
-  /** Nowy budynek: centrum handlowe albo uczelnia. */
-  addStructure(kind: 'mall' | 'university', x: number, z: number): string | null {
+  /** Nowy budynek z katalogu (SIMULATED). */
+  addStructure(kind: BuildId, x: number, z: number, rot = 0): string | null {
+    const spec = buildSpec(kind);
     const area = this.city?.area;
     const mLon = 111_320 * Math.cos(((area?.origin.lat ?? 50.06) * Math.PI) / 180);
     const halfX = ((area ? area.maxLon - area.origin.lon : 0.011) * mLon) / 2 - 20;
     const halfZ = ((area ? area.origin.lat - area.minLat : 0.009) * 111_320) / 2 - 20;
     if (Math.abs(x) > halfX || Math.abs(z) > halfZ) return 'Poza obszarem miasta.';
-    const w = kind === 'mall' ? 78 : 62, d = kind === 'mall' ? 66 : 54;
-    const clash = this.playerBuildings.some((b) => Math.hypot(b.x - x, b.z - z) < Math.max(b.w, b.d));
+    if (spec.id === 'park') return this.addPark(x, z, 'circle', spec.w, spec.d);
+    const clash = this.playerBuildings.some((b) => Math.hypot(b.x - x, b.z - z) < Math.max(b.w, b.d) * 0.55);
     if (clash) return 'Za blisko innego budynku.';
-    const cost = kind === 'mall' ? COST.mall : COST.university;
-    if (!this.spend(cost)) return 'Za mało środków w budżecie.';
+    if (!this.spend(spec.cost)) return 'Za mało środków w budżecie.';
 
+    const angle = spec.rotatable ? rot : 0;
     const b: PlayerBuilding = {
       id: this.playerBuildings.length,
-      x, z, w, d,
-      h: kind === 'mall' ? 14 : 22,
-      kind,
-      name: kind === 'mall' ? 'Nowe centrum handlowe' : 'Nowa uczelnia',
+      x, z, w: spec.w, d: spec.d, h: spec.h, rot: angle,
+      kind: spec.id,
+      name: spec.label,
+      color: spec.color,
+      roof: spec.roof,
+      residents: spec.residents,
+      jobs: spec.jobs,
     };
     const apply = () => {
       this.playerBuildings.push(b);
@@ -1167,10 +1245,70 @@ export class Sim {
       this.reroute();
     };
     apply();
-    // nowy cel ruchu: budynki przyciągają pojazdy
     this.hubs = [...this.hubs, this.nearestCarNode(x, z)].filter((n) => n >= 0);
     this.history.push({ label: b.name, at: Date.now(), apply, revert });
     return null;
+  }
+
+  /** Usunięcie budynku gracza (nie OSM). */
+  removePlayerBuilding(id: number): string | null {
+    const b = this.playerBuildings.find((p) => p.id === id);
+    if (!b) return 'Nie znaleziono budynku gracza.';
+    const apply = () => {
+      this.playerBuildings = this.playerBuildings.filter((p) => p.id !== id);
+      this.reweight();
+      this.reroute();
+    };
+    const revert = () => {
+      this.playerBuildings.push(b);
+      this.reweight();
+      this.reroute();
+    };
+    apply();
+    this.history.push({ label: `usunięto: ${b.name}`, at: Date.now(), apply, revert });
+    return null;
+  }
+
+  redo(): string | null {
+    const msg = this.history.redo();
+    this.version++;
+    this.invalidateRouting();
+    this.reroute();
+    return msg;
+  }
+
+  /**
+   * Podgląd katastrofy bez zmiany stanu – do panelu Anuluj / Uruchom.
+   */
+  previewDisaster(kind: DisasterKind, cx: number, cz: number): {
+    roads: number[];
+    radius: number;
+    label: string;
+    cost: number;
+    estimatedAffected: number;
+    effects: typeof DISASTER_EFFECTS[DisasterKind];
+  } {
+    const def = DISASTERS[kind];
+    const hit = pickRoads(
+      this.roads.filter((r) => !r.built),
+      cx, cz, def.radius, def.count,
+      (r) => !r.destroyed && r.edge.carAccess,
+    );
+    const roads = hit.map((r) => r.edge.id);
+    let residents = 0;
+    for (const b of this.playerBuildings) {
+      if (Math.hypot(b.x - cx, b.z - cz) <= def.radius) residents += b.residents;
+    }
+    // Szacunek: gęstość z budynków OSM w promieniu (przybliżenie).
+    const estOsm = Math.round(def.radius * def.radius * 0.00035);
+    return {
+      roads,
+      radius: def.radius,
+      label: def.label,
+      cost: def.cost,
+      estimatedAffected: residents + estOsm,
+      effects: DISASTER_EFFECTS[kind],
+    };
   }
 
   /** Nowa droga / autostrada łącząca dwa punkty – wstawiana do grafu. */
@@ -1248,17 +1386,15 @@ export class Sim {
     const def = DISASTERS[kind];
     if (!this.spend(def.cost)) return 'Za mało środków w budżecie.';
 
-    const radius = kind === 'earthquake' ? 700 : kind === 'flood' ? 500 : 220;
-    const count = kind === 'earthquake' ? 9 : kind === 'flood' ? 7 : 2;
     const hit = pickRoads(
       this.roads.filter((r) => !r.built),
-      cx, cz, radius, count,
+      cx, cz, def.radius, def.count,
       (r) => !r.destroyed && r.edge.carAccess,
     );
     const roads = hit.map((r) => r.edge.id);
     const d: DisasterState = {
       kind, roads, intensity: 1, startedAt: Date.now(),
-      label: def.label,
+      label: def.label, cx, cz,
     };
     const apply = () => {
       this.disasters.push(d);
@@ -1266,8 +1402,8 @@ export class Sim {
         const r = this.roads[id];
         if (!r) continue;
         if (kind === 'earthquake' || kind === 'fire') { r.destroyed = true; r.closure = 'none'; }
-        else if (kind === 'flood') { r.closure = 'closed'; }
-        else if (kind === 'blackout') { /* ulice przejezdne, ale wolniejsze */ }
+        else if (kind === 'flood' || kind === 'rain') { r.closure = 'closed'; }
+        else if (kind === 'blackout' || kind === 'heat') { /* spowolnienie przez disasterMood */ }
       }
       this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
       this.invalidateRouting();
@@ -1287,7 +1423,7 @@ export class Sim {
     };
     apply();
     this.history.push({
-      label: `${def.label} – ${roads.length} odcinków${kind === 'blackout' ? '' : ' zamkniętych'}`,
+      label: `${def.label} – ${roads.length} odcinków`,
       at: Date.now(), apply, revert,
     });
     return null;
@@ -1339,6 +1475,39 @@ export class Sim {
     return msg;
   }
 
+  /** Snapshot stanu gracza do IndexedDB (przeżywa refresh). */
+  exportPlayerState(): {
+    buildings: PlayerBuilding[];
+    parks: Park[];
+    budget: number;
+    residents: number;
+    jobs: number;
+  } {
+    return {
+      buildings: this.playerBuildings.map((b) => ({ ...b })),
+      parks: this.parks.map((p) => ({ ...p })),
+      budget: this.m.budget,
+      residents: this.playerBuildings.reduce((s, b) => s + b.residents, 0),
+      jobs: this.playerBuildings.reduce((s, b) => s + b.jobs, 0),
+    };
+  }
+
+  /** Przywrócenie budynków/parków gracza (bez historii undo – nowa sesja). */
+  applyPlayerSnapshot(snap: {
+    buildings: PlayerBuilding[];
+    parks: Park[];
+    budget: number;
+  }) {
+    this.playerBuildings = snap.buildings.map((b, i) => ({ ...b, id: i }));
+    this.parks = snap.parks.map((p) => ({ ...p }));
+    this.m.budget = snap.budget;
+    this.history = new PlayerHistory();
+    this.reweight();
+    this.invalidateRouting();
+    this.reroute();
+    this.version++;
+  }
+
   /* --------------------------------------------------------- odczyty */
 
   snapshot(): Snapshot {
@@ -1373,6 +1542,10 @@ export class Sim {
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
+}
+
+function clamp(v: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, v));
 }
 
 /** Godzina lokalna Kraków/Warszawa z ms epoch. */
