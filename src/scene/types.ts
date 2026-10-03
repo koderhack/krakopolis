@@ -19,8 +19,8 @@ export type Tool =
   | 'disaster'
   | 'build';
 
-/** Główny tryb pracy UI (pasek Buduj / Analiza / Zdarzenia / Historia). */
-export type WorkspaceMode = 'build' | 'analyze' | 'events' | 'history' | null;
+/** Główny tryb pracy UI (pasek Buduj / Analiza / Zdarzenia). */
+export type WorkspaceMode = 'build' | 'analyze' | 'events' | null;
 
 /** Rodzaj obiektu stawianego w terenie (niebieski podgląd). */
 export type PlaceKind = Exclude<Tool, 'select' | 'disaster' | 'build'> | 'build';

@@ -249,7 +249,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
       } else if (next === 'events') {
         setTool('disaster');
         setBuildId(null);
-      } else if (next === 'analyze' || next === 'history' || next === null) {
+      } else if (next === 'analyze' || next === null) {
         setTool('select');
         setBuildId(null);
       }
@@ -494,7 +494,6 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
       if (k === '1') { e.preventDefault(); setWorkspaceMode('build'); return; }
       if (k === '2') { e.preventDefault(); setWorkspaceMode('analyze'); return; }
       if (k === '3') { e.preventDefault(); setWorkspaceMode('events'); return; }
-      if (k === '4') { e.preventDefault(); setWorkspaceMode('history'); return; }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

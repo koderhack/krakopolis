@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { COST, type Sim } from '../simulation/sim';
 import type { CityData } from '../data/model';
 import type {
@@ -485,9 +485,17 @@ function wersjeLabel(n: number): string {
 function HistoryPanel({
   versions,
   onRestore,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
 }: {
   versions: CityVersion[];
   onRestore: (id: number) => void | Promise<void>;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
   const latest = versions[versions.length - 1] ?? null;
   const latestId = latest?.id ?? 0;
@@ -534,7 +542,7 @@ function HistoryPanel({
     setRestoring(id);
     try {
       await onRestore(id);
-      setFlash(`Przywrócono v${id} jako nową wersję — historia bez skasowań.`);
+      setFlash(`Przywrócono v${id} jako nową wersję.`);
     } catch {
       setFlash(`Nie udało się przywrócić v${id}.`);
     } finally {
@@ -542,126 +550,124 @@ function HistoryPanel({
     }
   };
 
-  if (!versions.length) {
-    return (
-      <aside className="changes history">
-        <h3>Historia miasta</h3>
-        <p className="hist-empty">
-          Brak zapisanych wersji. Po pierwszej zmianie w mieście pojawi się tu oś czasu.
-        </p>
-      </aside>
-    );
-  }
-
   return (
-    <aside className="changes history">
-      <h3>
-        Historia miasta
-        <small>{versions.length} {wersjeLabel(versions.length)}</small>
-      </h3>
+    <div className="brand-hist-body">
+      <div className="brand-hist-acts">
+        <button type="button" disabled={!canUndo} onClick={onUndo} title="Cofnij (Z)">↶ Cofnij</button>
+        <button type="button" disabled={!canRedo} onClick={onRedo} title="Ponów (Y)">↷ Ponów</button>
+      </div>
 
-      {flash && <p className="hist-flash" role="status">{flash}</p>}
-
-      {cmp && (
-        <div className="hist-diff" aria-live="polite">
-          <header className="hist-diff-head">
-            <strong>Porównanie</strong>
-            <span>v{cmp.a} → v{cmp.b}</span>
+      {!versions.length ? (
+        <p className="hist-empty">Brak zapisanych wersji. Po zmianie w mieście pojawi się tu oś czasu.</p>
+      ) : (
+        <>
+          <header className="brand-hist-head">
+            <strong>Historia miasta</strong>
+            <small>{versions.length} {wersjeLabel(versions.length)}</small>
           </header>
-          <p className="hist-diff-sub">
-            {cmp.labelA}
-            <span aria-hidden> · </span>
-            vs aktualna
-          </p>
-          <ul className="hist-diff-metrics">
-            {DIFF_ROWS.map(({ key, label }) => {
-              const n = cmp.delta[key];
-              if (n === 0) return null;
-              return (
-                <li key={key} className={n > 0 ? 'up' : 'down'}>
-                  <span>{label}</span>
-                  <b>{fmtMetricDelta(key, n)}</b>
-                </li>
-              );
-            })}
-            {DIFF_ROWS.every(({ key }) => cmp.delta[key] === 0) && (
-              <li className="flat"><span>Bez różnic metryk</span><b>—</b></li>
-            )}
-          </ul>
-          {cmp.newChanges.length > 0 && (
-            <div className="hist-diff-changes">
-              <span>Od v{cmp.a}</span>
-              <ul>
-                {cmp.newChanges.map((c, i) => (
-                  <li key={`${c.type}-${i}`}>{c.label}</li>
-                ))}
+
+          {flash && <p className="hist-flash" role="status">{flash}</p>}
+
+          {cmp && (
+            <div className="hist-diff" aria-live="polite">
+              <header className="hist-diff-head">
+                <strong>Porównanie</strong>
+                <span>v{cmp.a} → v{cmp.b}</span>
+              </header>
+              <p className="hist-diff-sub">
+                {cmp.labelA}
+                <span aria-hidden> · </span>
+                vs aktualna
+              </p>
+              <ul className="hist-diff-metrics">
+                {DIFF_ROWS.map(({ key, label }) => {
+                  const n = cmp.delta[key];
+                  if (n === 0) return null;
+                  return (
+                    <li key={key} className={n > 0 ? 'up' : 'down'}>
+                      <span>{label}</span>
+                      <b>{fmtMetricDelta(key, n)}</b>
+                    </li>
+                  );
+                })}
+                {DIFF_ROWS.every(({ key }) => cmp.delta[key] === 0) && (
+                  <li className="flat"><span>Bez różnic metryk</span><b>—</b></li>
+                )}
               </ul>
+              {cmp.newChanges.length > 0 && (
+                <div className="hist-diff-changes">
+                  <span>Od v{cmp.a}</span>
+                  <ul>
+                    {cmp.newChanges.map((c, i) => (
+                      <li key={`${c.type}-${i}`}>{c.label}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      <div className="hist-list">
-        {ordered.map((v) => {
-          const isLatest = v.id === latestId;
-          const canAct = !isLatest;
-          return (
-            <div
-              key={v.id}
-              className={`hist-item${cmpA === v.id ? ' cmp-on' : ''}${isLatest ? ' is-latest' : ''}`}
-            >
-              <div className="hist-item-top">
-                <b className="hist-ver">v{v.id}</b>
-                {isLatest && <span className="hist-badge">aktualna</span>}
-                {v.restoredFrom != null && (
-                  <span className="hist-badge from">z v{v.restoredFrom}</span>
-                )}
-                <em className="hist-date">
-                  {new Date(v.createdAt).toLocaleString('pl-PL', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    day: '2-digit',
-                    month: '2-digit',
-                  })}
-                </em>
-              </div>
-              <p className="hist-label">{v.label}</p>
-              {v.metrics && (
-                <div className="hist-metrics-mini" title="Metryki zapisane w tej wersji">
-                  <span>{Math.round(v.metrics.residents)} mieszk.</span>
-                  <span>{Math.round(v.metrics.jobs)} praca</span>
-                  <span>{formatBudgetPln(v.metrics.budget)}</span>
+          <div className="hist-list">
+            {ordered.map((v) => {
+              const isLatest = v.id === latestId;
+              const canAct = !isLatest;
+              return (
+                <div
+                  key={v.id}
+                  className={`hist-item${cmpA === v.id ? ' cmp-on' : ''}${isLatest ? ' is-latest' : ''}`}
+                >
+                  <div className="hist-item-top">
+                    <b className="hist-ver">v{v.id}</b>
+                    {isLatest && <span className="hist-badge">aktualna</span>}
+                    {v.restoredFrom != null && (
+                      <span className="hist-badge from">z v{v.restoredFrom}</span>
+                    )}
+                    <em className="hist-date">
+                      {new Date(v.createdAt).toLocaleString('pl-PL', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        day: '2-digit',
+                        month: '2-digit',
+                      })}
+                    </em>
+                  </div>
+                  <p className="hist-label">{v.label}</p>
+                  {v.metrics && (
+                    <div className="hist-metrics-mini" title="Metryki zapisane w tej wersji">
+                      <span>{Math.round(v.metrics.residents)} mieszk.</span>
+                      <span>{Math.round(v.metrics.jobs)} praca</span>
+                      <span>{formatBudgetPln(v.metrics.budget)}</span>
+                    </div>
+                  )}
+                  {canAct && (
+                    <div className="chg-acts">
+                      <button
+                        type="button"
+                        className="mini"
+                        onClick={() => void runCompare(v.id)}
+                        title="Porównaj z aktualną wersją"
+                      >
+                        Porównaj
+                      </button>
+                      <button
+                        type="button"
+                        className="mini restore"
+                        disabled={restoring != null}
+                        onClick={() => void runRestore(v.id)}
+                        title="Przywróć ten stan jako nową wersję"
+                      >
+                        {restoring === v.id ? 'Przywracam…' : 'Przywróć'}
+                      </button>
+                    </div>
+                  )}
                 </div>
-              )}
-              {canAct && (
-                <div className="chg-acts">
-                  <button
-                    type="button"
-                    className="mini"
-                    onClick={() => void runCompare(v.id)}
-                    title="Porównaj metryki z aktualną wersją"
-                  >
-                    Porównaj
-                  </button>
-                  <button
-                    type="button"
-                    className="mini restore"
-                    disabled={restoring != null}
-                    onClick={() => void runRestore(v.id)}
-                    title="Przywróć ten stan jako nową wersję (historia zostaje)"
-                  >
-                    {restoring === v.id ? 'Przywracam…' : 'Przywróć'}
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <p className="dp-note">
-        Przywrócenie tworzy nową wersję — nic nie kasuje. Z = undo, Y = redo w bieżącej sesji.
-      </p>
-    </aside>
+              );
+            })}
+          </div>
+          <p className="dp-note">Przywrócenie tworzy nową wersję — nic nie kasuje.</p>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -686,7 +692,8 @@ function HelpSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
         <li><kbd>Delete</kbd> / <kbd>Backspace</kbd> zburz budynek gracza</li>
         <li><kbd>Space</kbd> pauza</li>
         <li><kbd>N</kbd> całe miasto</li>
-        <li><kbd>1–4</kbd> Buduj / Analiza / Zdarzenia / Historia</li>
+        <li><kbd>1–3</kbd> Buduj / Analiza / Zdarzenia</li>
+        <li>Najedź na <b>Krakopolis</b> — historia miasta, cofnij / ponów</li>
         <li>Widok (prawy dół): Szukaj · Metryki · Panele · Minimapa · Stopka · Tryby — zwijanie etykietą Widok</li>
         <li>Chevrony z boków zwijają pojedynczy panel</li>
         <li>Warstwy mapy i napisy: tryb <b>Analiza</b> (panel Mapa)</li>
@@ -717,6 +724,9 @@ export function Hud({
   const [showModeBar, setShowModeBar] = useState(true);
   const [dockOpen, setDockOpen] = useState(true);
   const [clockOpen, setClockOpen] = useState(false);
+  const [histOpen, setHistOpen] = useState(false);
+  const [histPinned, setHistPinned] = useState(false);
+  const histLeaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [clockOffsetUi, setClockOffsetUi] = useState(0);
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -752,6 +762,9 @@ export function Hud({
     app.classList.toggle('no-mode-bar', !showModeBar);
     app.classList.toggle('dock-collapsed', !dockOpen);
   }, [showFoot, showMinimap, showModeBar, dockOpen]);
+  useEffect(() => () => {
+    if (histLeaveTimer.current) clearTimeout(histLeaveTimer.current);
+  }, []);
 
   const r = sel?.kind === 'road' ? sim.roads[sel.id] : null;
   const b = sel?.kind === 'building' ? city.buildings[sel.id] : null;
@@ -778,16 +791,68 @@ export function Hud({
   const showCatalog = mode === 'build';
   const showAnalysis = mode === 'analyze';
   const showEvents = mode === 'events';
-  const showHistory = mode === 'history';
+
+  const openHist = () => {
+    if (histLeaveTimer.current) {
+      clearTimeout(histLeaveTimer.current);
+      histLeaveTimer.current = null;
+    }
+    setClockOpen(false);
+    setHistOpen(true);
+  };
+  const scheduleCloseHist = () => {
+    if (histPinned) return;
+    if (histLeaveTimer.current) clearTimeout(histLeaveTimer.current);
+    histLeaveTimer.current = setTimeout(() => setHistOpen(false), 220);
+  };
 
   return (
     <>
       <header className={`top${!showMetrics ? ' collapsed' : ''}`}>
         {showMetrics && (
           <>
-            <div className="brand">
-              <b>Krakopolis</b>
-              <span>planista miejski</span>
+            <div
+              className={`brand-hist${histOpen ? ' open' : ''}`}
+              onMouseEnter={openHist}
+              onMouseLeave={scheduleCloseHist}
+            >
+              <button
+                type="button"
+                className="brand-hist-btn"
+                title="Historia miasta"
+                aria-expanded={histOpen}
+                onClick={() => {
+                  setClockOpen(false);
+                  if (histPinned && histOpen) {
+                    setHistPinned(false);
+                    setHistOpen(false);
+                  } else {
+                    setHistPinned(true);
+                    setHistOpen(true);
+                  }
+                }}
+              >
+                <b>Krakopolis</b>
+                <span>planista miejski · historia</span>
+              </button>
+              {histOpen && (
+                <div
+                  className="brand-hist-pop"
+                  role="dialog"
+                  aria-label="Historia miasta"
+                  onMouseEnter={openHist}
+                  onMouseLeave={scheduleCloseHist}
+                >
+                  <HistoryPanel
+                    versions={versions}
+                    onRestore={onRestoreVersion}
+                    canUndo={sim.history.canUndo}
+                    canRedo={sim.history.canRedo}
+                    onUndo={() => act(() => sim.undo(), '')}
+                    onRedo={() => act(() => sim.redo(), '')}
+                  />
+                </div>
+              )}
             </div>
             <div className="metrics">
               {METRICS.map((m) => (
@@ -808,7 +873,11 @@ export function Hud({
                   type="button"
                   className="sim-clock-btn"
                   title="Przewiń czas ±24 h"
-                  onClick={() => setClockOpen((v) => !v)}
+                  onClick={() => {
+                    setHistOpen(false);
+                    setHistPinned(false);
+                    setClockOpen((v) => !v);
+                  }}
                 >
                   <span className="sim-clock-label">Czas</span>
                   <strong className="sim-clock-time">{s.clock}</strong>
@@ -864,7 +933,6 @@ export function Hud({
             ['build', 'Buduj', '1'],
             ['analyze', 'Analiza', '2'],
             ['events', 'Zdarzenia', '3'],
-            ['history', 'Historia', '4'],
           ] as const).map(([id, label, key]) => (
             <button
               key={id}
@@ -889,7 +957,7 @@ export function Hud({
         </div>
       </div>
 
-      <div className={`col right${rightCollapsed ? ' collapsed' : ''}${showHistory ? ' history-wide' : ''}`}>
+      <div className={`col right${rightCollapsed ? ' collapsed' : ''}${showMinimap ? '' : ' no-mini'}`}>
         <button type="button" className="side-toggle right-toggle" onClick={() => setRightCollapsed((v) => !v)}>
           {rightCollapsed ? '‹' : '›'}
         </button>
@@ -914,7 +982,6 @@ export function Hud({
             />
           )}
           {showEvents && <EventsPanel disaster={disaster} setDisaster={setDisaster} />}
-          {showHistory && <HistoryPanel versions={versions} onRestore={onRestoreVersion} />}
           {report && (
             <ConsequencePanel
               report={report}
@@ -978,7 +1045,7 @@ export function Hud({
               </div>
             </aside>
           )}
-          {!showHistory && !showCatalog && !showAnalysis && !showEvents && <EnvironmentCard city={city} />}
+          {!showCatalog && !showAnalysis && !showEvents && <EnvironmentCard city={city} />}
         </div>
       </div>
 
@@ -1009,8 +1076,7 @@ export function Hud({
                   : 'Wybierz obiekt z katalogu po prawej.')
               : mode === 'events' ? `Kliknij miejsce: ${DISASTERS[disaster].label}.`
                 : mode === 'analyze' ? 'Warstwy modelu i mapy w panelu po prawej · Napisy na dole.'
-                  : mode === 'history' ? 'Porównaj lub przywróć wersję jako nową.'
-                    : 'LPM = obrót · PPM = przesuwanie · ? = sterowanie · Widok = prawy dół.'}
+                    : 'LPM = obrót · PPM = przesuwanie · ? = sterowanie · Widok = prawy dół · najedź na Krakopolis = historia.'}
       </div>
       {toast && <div className="toast">{toast}</div>}
 
