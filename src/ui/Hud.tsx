@@ -15,7 +15,7 @@ import { buildIndex, search, KIND_LABEL, type Place } from '../scene/search';
 import type { PlaceRef } from '../scene/types';
 import { BUILD_GROUPS, CATALOG, type BuildId } from '../simulation/city/catalog';
 import type { ConsequenceReport } from '../simulation/consequences';
-import type { CityVersion } from '../data/cityStore';
+import type { CityVersion, VersionCompare } from '../data/cityStore';
 import { compareVersions } from '../data/cityStore';
 import { formatBudgetPln, KRAKOW_BUDGET_2025 } from '../data/budget';
 import { Minimap, type MiniCam } from './Minimap';
@@ -40,7 +40,7 @@ interface Props {
   onConfirmDisaster: () => void;
   onCancelPending: () => void;
   onDismissReport: () => void;
-  onRestoreVersion: (id: number) => void;
+  onRestoreVersion: (id: number) => void | Promise<void>;
   paused: boolean;
   speed: number;
   trafficView: TrafficView;
@@ -556,52 +556,219 @@ function EventsPanel({
   );
 }
 
-function HistoryPanel({ versions, onRestore }: { versions: CityVersion[]; onRestore: (id: number) => void }) {
-  const recent = versions.slice(-12).reverse();
-  const [cmp, setCmp] = useState<string | null>(null);
+function fmtSigned(n: number, digits = 0): string {
+  const v = digits > 0 ? n.toFixed(digits) : String(Math.round(n));
+  if (n > 0) return `+${v}`;
+  return v;
+}
+
+function fmtMetricDelta(key: string, n: number): string {
+  if (key === 'budget') {
+    const s = formatBudgetPln(Math.abs(n));
+    return n > 0 ? `+${s}` : n < 0 ? `−${s}` : s;
+  }
+  return fmtSigned(n, key === 'traffic' || key === 'satisfaction' ? 1 : 0);
+}
+
+const DIFF_ROWS: { key: keyof VersionCompare['delta']; label: string }[] = [
+  { key: 'residents', label: 'Mieszkańcy' },
+  { key: 'jobs', label: 'Praca' },
+  { key: 'buildings', label: 'Budynki' },
+  { key: 'parks', label: 'Parki' },
+  { key: 'budget', label: 'Budżet' },
+  { key: 'satisfaction', label: 'Satysfakcja' },
+  { key: 'traffic', label: 'Ruch' },
+  { key: 'changes', label: 'Zmiany' },
+];
+
+function wersjeLabel(n: number): string {
+  if (n === 1) return 'wersja';
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'wersje';
+  return 'wersji';
+}
+
+function HistoryPanel({
+  versions,
+  onRestore,
+}: {
+  versions: CityVersion[];
+  onRestore: (id: number) => void | Promise<void>;
+}) {
+  const latest = versions[versions.length - 1] ?? null;
+  const latestId = latest?.id ?? 0;
+  const ordered = useMemo(() => [...versions].reverse(), [versions]);
+  const [cmp, setCmp] = useState<VersionCompare | null>(null);
   const [cmpA, setCmpA] = useState<number | null>(null);
+  const [restoring, setRestoring] = useState<number | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+
   useEffect(() => {
     let alive = true;
     (async () => {
-      if (versions.length < 2) { setCmp(null); return; }
+      if (versions.length < 2) {
+        setCmp(null);
+        setCmpA(null);
+        return;
+      }
       const a = versions[versions.length - 2];
       const b = versions[versions.length - 1];
       const d = await compareVersions(a.id, b.id);
       if (!alive || !d) return;
-      const x = d.delta;
-      setCmp(`v${a.id}→v${b.id}: mieszkańcy ${x.residents >= 0 ? '+' : ''}${x.residents}, praca ${x.jobs >= 0 ? '+' : ''}${x.jobs}`);
+      setCmp(d);
+      setCmpA(a.id);
     })();
     return () => { alive = false; };
   }, [versions]);
 
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 4200);
+    return () => clearTimeout(t);
+  }, [flash]);
+
   const runCompare = async (id: number) => {
-    const latest = versions[versions.length - 1];
-    if (!latest || latest.id === id) { setCmp('Wybierz starszą wersję.'); return; }
+    if (!latest || latest.id === id) return;
     const d = await compareVersions(id, latest.id);
     if (!d) return;
     setCmpA(id);
-    const x = d.delta;
-    setCmp(`v${id} vs v${latest.id}: budynki ${x.buildings >= 0 ? '+' : ''}${x.buildings}, mieszkańcy ${x.residents >= 0 ? '+' : ''}${x.residents}`);
+    setCmp(d);
   };
 
-  if (!recent.length) return null;
+  const runRestore = async (id: number) => {
+    if (restoring != null || id === latestId) return;
+    setRestoring(id);
+    try {
+      await onRestore(id);
+      setFlash(`Przywrócono v${id} jako nową wersję — historia bez skasowań.`);
+    } catch {
+      setFlash(`Nie udało się przywrócić v${id}.`);
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  if (!versions.length) {
+    return (
+      <aside className="changes history">
+        <h3>Historia miasta</h3>
+        <p className="hist-empty">
+          Brak zapisanych wersji. Po pierwszej zmianie w mieście pojawi się tu oś czasu
+          (IndexedDB — przeżywa odświeżenie strony).
+        </p>
+      </aside>
+    );
+  }
+
   return (
     <aside className="changes history">
-      <h3>Historia miasta <small>IndexedDB</small></h3>
-      {cmp && <p className="cmp-line">{cmp}</p>}
-      {recent.map((v) => (
-        <div key={v.id} className={`chg${cmpA === v.id ? ' cmp-on' : ''}`}>
-          <span>v{v.id} — {v.label}</span>
-          <em>{new Date(v.createdAt).toLocaleString('pl-PL', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}</em>
-          <div className="chg-acts">
-            <button type="button" className="mini" onClick={() => void runCompare(v.id)}>Porównaj</button>
-            {v.id < (versions[versions.length - 1]?.id ?? 0) && (
-              <button type="button" className="mini" onClick={() => onRestore(v.id)}>Przywróć jako nową</button>
+      <h3>
+        Historia miasta
+        <small>{versions.length} {wersjeLabel(versions.length)}</small>
+      </h3>
+
+      {flash && <p className="hist-flash" role="status">{flash}</p>}
+
+      {cmp && (
+        <div className="hist-diff" aria-live="polite">
+          <header className="hist-diff-head">
+            <strong>Porównanie</strong>
+            <span>v{cmp.a} → v{cmp.b}</span>
+          </header>
+          <p className="hist-diff-sub">
+            {cmp.labelA}
+            <span aria-hidden> · </span>
+            vs aktualna
+          </p>
+          <ul className="hist-diff-metrics">
+            {DIFF_ROWS.map(({ key, label }) => {
+              const n = cmp.delta[key];
+              if (n === 0) return null;
+              return (
+                <li key={key} className={n > 0 ? 'up' : 'down'}>
+                  <span>{label}</span>
+                  <b>{fmtMetricDelta(key, n)}</b>
+                </li>
+              );
+            })}
+            {DIFF_ROWS.every(({ key }) => cmp.delta[key] === 0) && (
+              <li className="flat"><span>Bez różnic metryk</span><b>—</b></li>
             )}
-          </div>
+          </ul>
+          {cmp.newChanges.length > 0 && (
+            <div className="hist-diff-changes">
+              <span>Od v{cmp.a}</span>
+              <ul>
+                {cmp.newChanges.map((c, i) => (
+                  <li key={`${c.type}-${i}`}>{c.label}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
-      ))}
-      <p className="dp-note">Przywrócenie tworzy nową wersję. Z = undo, Y = redo.</p>
+      )}
+
+      <div className="hist-list">
+        {ordered.map((v) => {
+          const isLatest = v.id === latestId;
+          const canAct = !isLatest;
+          return (
+            <div
+              key={v.id}
+              className={`hist-item${cmpA === v.id ? ' cmp-on' : ''}${isLatest ? ' is-latest' : ''}`}
+            >
+              <div className="hist-item-top">
+                <b className="hist-ver">v{v.id}</b>
+                {isLatest && <span className="hist-badge">aktualna</span>}
+                {v.restoredFrom != null && (
+                  <span className="hist-badge from">z v{v.restoredFrom}</span>
+                )}
+                <em className="hist-date">
+                  {new Date(v.createdAt).toLocaleString('pl-PL', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    day: '2-digit',
+                    month: '2-digit',
+                  })}
+                </em>
+              </div>
+              <p className="hist-label">{v.label}</p>
+              {v.metrics && (
+                <div className="hist-metrics-mini" title="Metryki zapisane w tej wersji">
+                  <span>{Math.round(v.metrics.residents)} mieszk.</span>
+                  <span>{Math.round(v.metrics.jobs)} praca</span>
+                  <span>{formatBudgetPln(v.metrics.budget)}</span>
+                </div>
+              )}
+              {canAct && (
+                <div className="chg-acts">
+                  <button
+                    type="button"
+                    className="mini"
+                    onClick={() => void runCompare(v.id)}
+                    title="Porównaj metryki z aktualną wersją"
+                  >
+                    Porównaj
+                  </button>
+                  <button
+                    type="button"
+                    className="mini restore"
+                    disabled={restoring != null}
+                    onClick={() => void runRestore(v.id)}
+                    title="Przywróć ten stan jako nową wersję (historia zostaje)"
+                  >
+                    {restoring === v.id ? 'Przywracam…' : 'Przywróć'}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <p className="dp-note">
+        Przywrócenie tworzy nową wersję — nic nie kasuje. Z = undo, Y = redo w bieżącej sesji.
+      </p>
     </aside>
   );
 }
@@ -831,7 +998,7 @@ export function Hud({
         </div>
       </div>
 
-      <div className={`col right${rightCollapsed ? ' collapsed' : ''}`}>
+      <div className={`col right${rightCollapsed ? ' collapsed' : ''}${showHistory ? ' history-wide' : ''}`}>
         <button type="button" className="side-toggle right-toggle" onClick={() => setRightCollapsed((v) => !v)}>
           {rightCollapsed ? '‹' : '›'}
         </button>

@@ -621,7 +621,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         onCancelPending={cancelPending}
         onDismissReport={() => setReport(null)}
         versions={versions}
-        onRestoreVersion={(id) => void onRestore(id)}
+        onRestoreVersion={onRestore}
         mapBounds={mapBounds}
         camSample={camSample}
         landmarks={landmarks}

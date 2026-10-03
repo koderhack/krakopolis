@@ -156,15 +156,49 @@ export async function restoreVersion(fromId: number): Promise<CityVersion> {
   return next;
 }
 
-export async function compareVersions(aId: number, bId: number) {
+const EMPTY_METRICS = { traffic: 0, satisfaction: 0, budget: 0, residents: 0, jobs: 0 };
+
+export type VersionMetrics = NonNullable<CityVersion['metrics']>;
+
+export interface VersionCompare {
+  a: number;
+  b: number;
+  labelA: string;
+  labelB: string;
+  metricsA: VersionMetrics;
+  metricsB: VersionMetrics;
+  delta: {
+    traffic: number;
+    satisfaction: number;
+    budget: number;
+    residents: number;
+    jobs: number;
+    changes: number;
+    buildings: number;
+    parks: number;
+  };
+  /** Zmiany obecne w B, których nie było w A (po id). */
+  newChanges: { label: string; type: string }[];
+}
+
+export async function compareVersions(aId: number, bId: number): Promise<VersionCompare | null> {
   const a = await getVersion(aId);
   const b = await getVersion(bId);
   if (!a || !b) return null;
-  const ma = a.metrics ?? { traffic: 0, satisfaction: 0, budget: 0, residents: 0, jobs: 0 };
-  const mb = b.metrics ?? { traffic: 0, satisfaction: 0, budget: 0, residents: 0, jobs: 0 };
+  const ma = a.metrics ?? EMPTY_METRICS;
+  const mb = b.metrics ?? EMPTY_METRICS;
+  const aIds = new Set(a.changes.map((c) => c.id));
+  const newChanges = b.changes
+    .filter((c) => !aIds.has(c.id))
+    .slice(-10)
+    .map((c) => ({ label: c.label, type: c.type }));
   return {
     a: aId,
     b: bId,
+    labelA: a.label,
+    labelB: b.label,
+    metricsA: ma,
+    metricsB: mb,
     delta: {
       traffic: mb.traffic - ma.traffic,
       satisfaction: mb.satisfaction - ma.satisfaction,
@@ -173,6 +207,8 @@ export async function compareVersions(aId: number, bId: number) {
       jobs: mb.jobs - ma.jobs,
       changes: b.changes.length - a.changes.length,
       buildings: (b.snapshot?.buildings.length ?? 0) - (a.snapshot?.buildings.length ?? 0),
+      parks: (b.snapshot?.parks.length ?? 0) - (a.snapshot?.parks.length ?? 0),
     },
+    newChanges,
   };
 }
