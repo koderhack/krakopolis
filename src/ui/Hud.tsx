@@ -547,8 +547,7 @@ function HistoryPanel({
       <aside className="changes history">
         <h3>Historia miasta</h3>
         <p className="hist-empty">
-          Brak zapisanych wersji. Po pierwszej zmianie w mieście pojawi się tu oś czasu
-          (IndexedDB — przeżywa odświeżenie strony).
+          Brak zapisanych wersji. Po pierwszej zmianie w mieście pojawi się tu oś czasu.
         </p>
       </aside>
     );

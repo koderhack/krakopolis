@@ -176,18 +176,24 @@ button small { color: var(--muted); font-size: 10px; }
 }
 .col.right {
   right: 14px; flex-direction: row-reverse;
+  /* jawna wysokość = panel Historii wypełnia miejsce i scrolluje listę */
+  height: calc(100vh - 74px - var(--right-clearance));
   max-height: calc(100vh - 74px - var(--right-clearance));
+  min-height: 0;
   overflow: hidden;
+  transition: height 0.2s ease, max-height 0.2s ease;
 }
 .col .side-stack {
   width: 306px;
   display: flex; flex-direction: column; gap: 10px;
-  max-height: inherit; overflow-y: auto; overflow-x: hidden;
+  max-height: 100%;
+  min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
   scrollbar-width: thin;
   pointer-events: auto;
   transition: opacity 0.18s ease, transform 0.22s ease;
 }
-.col.right .side-stack { width: 300px; }
+.col.right .side-stack { width: 300px; height: 100%; }
 .col.left.collapsed { transform: translateX(calc(-100% + 28px)); }
 .col.right.collapsed { transform: translateX(calc(100% - 28px)); }
 .col.collapsed .side-stack {
@@ -549,10 +555,14 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
 }
 .changes.history .mini:disabled { opacity: 0.45; cursor: default; }
 /* Historia: wypełnij kolumnę i scrolluj listę w panelu */
+.col.right.history-wide .side-stack {
+  overflow: hidden; /* scroll tylko w .hist-list */
+}
 .col.right .side-stack > .changes.history {
   flex: 1 1 auto !important;
-  min-height: 220px;
-  max-height: 100%;
+  min-height: 0 !important;
+  max-height: none;
+  height: 100%;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -612,7 +622,10 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
 @media (max-width: 820px) {
   .col.left, .col.right { top: 120px; }
   .col.left { max-height: calc(100vh - 120px - var(--left-clearance)); }
-  .col.right { max-height: calc(100vh - 120px - var(--right-clearance)); }
+  .col.right {
+    height: calc(100vh - 120px - var(--right-clearance));
+    max-height: calc(100vh - 120px - var(--right-clearance));
+  }
   .col.left .side-stack, .col.right .side-stack { width: min(260px, 72vw); }
   .col.right.history-wide .side-stack { width: min(300px, 78vw); }
   .hint { max-width: min(50vw, 220px); font-size: 10px; }
