@@ -22,6 +22,7 @@ import { BusFleet, CarFleet, ObservedMarkers, PedestrianFleet, TramFleet } from 
 import { PlacementGhost, type PlaceKind } from './models/Placement';
 import type { FleetPose, FlyTarget, Sel } from './types';
 import { LandmarkExtras } from './models/Landmarks';
+import { NeoAgent } from './models/Neo';
 
 export interface CitySceneProps {
   sim: Sim;
@@ -39,12 +40,14 @@ export interface CitySceneProps {
   pendingPose?: { x: number; z: number; rot: number } | null;
   roadFrom: { x: number; z: number } | null;
   selectedVehicle: string | null;
+  neoSelected?: boolean;
   flyTo: FlyTarget | null;
   disasterPreview?: { x: number; z: number; radius: number } | null;
   onSelect: (s: Sel) => void;
   onGround: (x: number, z: number) => void;
   onCommit: (x: number, z: number, x2: number, z2: number) => void;
   onPickVehicle: (id: string, kind: 'tram' | 'bus') => void;
+  onPickNeo?: () => void;
   onFocusObject?: (x: number, z: number) => void;
   /** Podgląd z góry zamiast perspektywy „z miasta”. */
   topDown: boolean;
@@ -549,6 +552,15 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
       <RealFleet sim={sim} onPick={p.onPickVehicle} selected={p.selectedVehicle} layers={p.layers} />
       <SimFleet sim={sim} layers={p.layers} />
       {p.layers.has('pedestrians') && <PedestrianFleet peds={sim.peds} active={Math.round(sim.activePeds)} />}
+      {p.layers.has('pedestrians') && (
+        <NeoAgent
+          sim={sim}
+          paused={p.paused}
+          speed={p.speed}
+          selected={!!p.neoSelected}
+          onPick={() => p.onPickNeo?.()}
+        />
+      )}
       {p.layers.has('pedflow') && <PedFlow sim={sim} ver={p.ver} />}
       {p.layers.has('labels') && <Labels key={`labels-${staticKey}`} city={city} ver={p.ver} />}
       <Ghost kind={p.placeKind} buildId={p.buildId} roadFrom={p.roadFrom} onCommit={p.onCommit} rot={p.buildRot} pendingPose={p.pendingPose} />

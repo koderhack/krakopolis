@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { COST, type Sim } from '../simulation/sim';
 import type { CityData } from '../data/model';
-import type { FleetPose, Sel, Tool, TrafficView, PendingBuild } from '../scene/types';
+import type {
+  FleetPose, Sel, Tool, TrafficView, PendingBuild, PendingDisaster, WorkspaceMode,
+} from '../scene/types';
 import { LAYERS } from '../scene/layers';
+import { ANALYSIS_LAYERS } from '../scene/analysis';
 import { DISASTERS, type DisasterKind } from '../simulation/city/player';
 import type { PipelineSnapshot } from '../data/pipeline';
 import { formatAge } from '../data/cache/store';
@@ -15,6 +18,7 @@ import type { ConsequenceReport } from '../simulation/consequences';
 import type { CityVersion } from '../data/cityStore';
 import { compareVersions } from '../data/cityStore';
 import { formatBudgetPln, KRAKOW_BUDGET_2025 } from '../data/budget';
+import { Minimap, type MiniCam } from './Minimap';
 
 interface Props {
   sim: Sim;
@@ -22,12 +26,18 @@ interface Props {
   ver: number;
   sel: Sel;
   tool: Tool;
+  mode: WorkspaceMode;
+  setMode: (m: WorkspaceMode) => void;
   buildId: BuildId | null;
   setBuildId: (id: BuildId | null) => void;
+  buildRot: number;
+  rotateBuild: () => void;
   pending: PendingBuild | null;
+  pendingDisaster: PendingDisaster | null;
   report: ConsequenceReport | null;
   versions: CityVersion[];
   onConfirmPending: () => void;
+  onConfirmDisaster: () => void;
   onCancelPending: () => void;
   onDismissReport: () => void;
   onRestoreVersion: (id: number) => void;
@@ -36,11 +46,15 @@ interface Props {
   trafficView: TrafficView;
   msg: { id: number; text: string };
   pipe: PipelineSnapshot;
-  flyMode: boolean;
   vehicle: FleetPose | null;
+  neoSelected?: boolean;
+  setNeoSelected?: (v: boolean) => void;
   goto: (x: number, z: number, ref?: PlaceRef) => void;
+  fitCity: () => void;
   layers: Set<string>;
   toggleLayer: (id: string) => void;
+  analysis: Set<string>;
+  toggleAnalysis: (id: string) => void;
   disaster: DisasterKind;
   setDisaster: (d: DisasterKind) => void;
   roadFrom: { x: number; z: number } | null;
@@ -50,9 +64,11 @@ interface Props {
   setPaused: (b: boolean) => void;
   setSpeed: (n: number) => void;
   setTrafficView: (v: TrafficView) => void;
-  setFlyMode: (v: boolean) => void;
   setVehicle: (v: FleetPose | null) => void;
   act: (fn: () => string | null, ok?: string) => void;
+  mapBounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+  camSample: MiniCam | null;
+  landmarks: { x: number; z: number }[];
 }
 
 const METRICS = [
@@ -142,7 +158,10 @@ function SearchBox({
           {results.map((p, i) => (
             <li key={i} onMouseDown={() => pick(p)}>
               <b>{p.name}</b>
-              <span>{p.detail ?? KIND_LABEL[p.kind]}</span>
+              <span>
+                {KIND_LABEL[p.kind]}
+                {p.detail ? ` · ${p.detail}` : ''}
+              </span>
             </li>
           ))}
         </ul>
@@ -348,11 +367,13 @@ function EnvironmentCard({ city }: { city: CityData }) {
 /* ------------------------------------------------ konsekwencje / katalog */
 
 function ConsequencePanel({
-  report, pending, onConfirm, onCancel, onDismiss,
+  report, pending, pendingDisaster, onConfirm, onConfirmDisaster, onCancel, onDismiss,
 }: {
   report: ConsequenceReport;
   pending: PendingBuild | null;
+  pendingDisaster: PendingDisaster | null;
   onConfirm: () => void;
+  onConfirmDisaster: () => void;
   onCancel: () => void;
   onDismiss: () => void;
 }) {
@@ -383,14 +404,16 @@ function ConsequencePanel({
           <div key={h.label}><b>{h.label}</b><span>{h.note}</span></div>
         ))}
       </div>
-      {pending ? (
+      {pending || pendingDisaster ? (
         <div className="acts confirm-acts">
-          <button className="primary" onClick={onConfirm}>Zatwierdź zmianę</button>
-          <button onClick={onCancel}>Anuluj</button>
+          <button type="button" onClick={onCancel}>Anuluj</button>
+          <button type="button" className="primary" onClick={pending ? onConfirm : onConfirmDisaster}>
+            {pendingDisaster ? 'Uruchom symulację' : 'Zatwierdź'}
+          </button>
         </div>
       ) : (
         <div className="acts">
-          <button onClick={onDismiss}>Zamknij</button>
+          <button type="button" onClick={onDismiss}>Zamknij</button>
         </div>
       )}
       <p className="note">Wyniki to SIMULATED / szacunek modelu – nie „AI predictions”.</p>
@@ -399,42 +422,96 @@ function ConsequencePanel({
 }
 
 function CatalogPanel({
-  buildId, setBuildId, open, setOpen,
+  buildId, setBuildId, open,
 }: {
   buildId: BuildId | null;
   setBuildId: (id: BuildId | null) => void;
   open: boolean;
-  setOpen: (v: boolean) => void;
 }) {
   if (!open) return null;
   return (
     <aside className="panel catalog">
-      <h2>Zbuduj <small>katalog</small></h2>
-      <p className="sub">Wybierz typ → kliknij mapę → zatwierdź</p>
-      {BUILD_GROUPS.map((g) => (
-        <div key={g} className="cat-group">
-          <h3>{g}</h3>
-          {CATALOG.filter((c) => c.group === g).map((c) => (
-            <button
-              key={c.id}
-              className={buildId === c.id ? 'on' : ''}
-              onClick={() => { setBuildId(c.id); setOpen(false); }}
-              title={c.desc}
-            >
-              <i className="swatch" style={{ background: c.color }} />
-              <span>{c.label}</span>
-              <small>{formatBudgetPln(c.cost)}</small>
-            </button>
-          ))}
-        </div>
+      <h2>Buduj <small>katalog</small></h2>
+      <p className="sub">Wybierz → kliknij mapę → R obraca → zatwierdź</p>
+      {BUILD_GROUPS.map((g) => {
+        const items = CATALOG.filter((c) => c.group === g);
+        if (!items.length) return null;
+        return (
+          <div key={g} className="cat-group">
+            <h3>{g}</h3>
+            {items.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={buildId === c.id ? 'on' : ''}
+                onClick={() => setBuildId(c.id)}
+                title={c.desc}
+              >
+                <i className="swatch" style={{ background: c.color }} />
+                <span>{c.label}</span>
+                <small>{formatBudgetPln(c.cost)}</small>
+              </button>
+            ))}
+          </div>
+        );
+      })}
+    </aside>
+  );
+}
+
+function AnalysisPanel({ analysis, toggle }: { analysis: Set<string>; toggle: (id: string) => void }) {
+  return (
+    <aside className="panel analysis">
+      <h2>Analiza <small>warstwy</small></h2>
+      <p className="sub">Wyniki modelu – bez fałszywej precyzji</p>
+      {ANALYSIS_LAYERS.map((l) => (
+        <button
+          key={l.id}
+          type="button"
+          className={analysis.has(l.id) ? 'on' : ''}
+          title={l.hint}
+          onClick={() => toggle(l.id)}
+        >
+          <i className="dot" />
+          <span>{l.label}</span>
+          {l.estimate && <small>szacunek</small>}
+        </button>
       ))}
     </aside>
   );
 }
 
+function EventsPanel({
+  disaster, setDisaster,
+}: {
+  disaster: DisasterKind;
+  setDisaster: (d: DisasterKind) => void;
+}) {
+  return (
+    <aside className="panel events">
+      <h2>Zdarzenia <small>scenariusze</small></h2>
+      <p className="sub">Wybierz → kliknij mapę → podgląd → uruchom</p>
+      <div className="event-list">
+        {(Object.keys(DISASTERS) as DisasterKind[]).map((k) => (
+          <button
+            key={k}
+            type="button"
+            className={disaster === k ? 'on danger' : ''}
+            onClick={() => setDisaster(k)}
+          >
+            <span>{DISASTERS[k].label}</span>
+            <small>{formatBudgetPln(DISASTERS[k].cost)}</small>
+          </button>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
 function HistoryPanel({ versions, onRestore }: { versions: CityVersion[]; onRestore: (id: number) => void }) {
-  const recent = versions.slice(-8).reverse();
+  const recent = versions.slice(-12).reverse();
   const [cmp, setCmp] = useState<string | null>(null);
+  const [cmpA, setCmpA] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -444,48 +521,90 @@ function HistoryPanel({ versions, onRestore }: { versions: CityVersion[]; onRest
       const d = await compareVersions(a.id, b.id);
       if (!alive || !d) return;
       const x = d.delta;
-      setCmp(`v${a.id}→v${b.id}: mieszkańcy ${x.residents >= 0 ? '+' : ''}${x.residents}, praca ${x.jobs >= 0 ? '+' : ''}${x.jobs}, budżet ${x.budget >= 0 ? '+' : ''}${Math.round(x.budget)}, budynki ${x.buildings >= 0 ? '+' : ''}${x.buildings}`);
+      setCmp(`v${a.id}→v${b.id}: mieszkańcy ${x.residents >= 0 ? '+' : ''}${x.residents}, praca ${x.jobs >= 0 ? '+' : ''}${x.jobs}`);
     })();
     return () => { alive = false; };
   }, [versions]);
+
+  const runCompare = async (id: number) => {
+    const latest = versions[versions.length - 1];
+    if (!latest || latest.id === id) { setCmp('Wybierz starszą wersję.'); return; }
+    const d = await compareVersions(id, latest.id);
+    if (!d) return;
+    setCmpA(id);
+    const x = d.delta;
+    setCmp(`v${id} vs v${latest.id}: budynki ${x.buildings >= 0 ? '+' : ''}${x.buildings}, mieszkańcy ${x.residents >= 0 ? '+' : ''}${x.residents}`);
+  };
+
   if (!recent.length) return null;
   return (
     <aside className="changes history">
       <h3>Historia miasta <small>IndexedDB</small></h3>
       {cmp && <p className="cmp-line">{cmp}</p>}
       {recent.map((v) => (
-        <div key={v.id} className="chg">
-          <span>v{v.id} · {v.label}</span>
+        <div key={v.id} className={`chg${cmpA === v.id ? ' cmp-on' : ''}`}>
+          <span>v{v.id} — {v.label}</span>
           <em>{new Date(v.createdAt).toLocaleString('pl-PL', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}</em>
-          {v.id < (versions[versions.length - 1]?.id ?? 0) && (
-            <button type="button" className="mini" onClick={() => onRestore(v.id)} title="Nowa wersja z tego stanu">Przywróć</button>
-          )}
+          <div className="chg-acts">
+            <button type="button" className="mini" onClick={() => void runCompare(v.id)}>Porównaj</button>
+            {v.id < (versions[versions.length - 1]?.id ?? 0) && (
+              <button type="button" className="mini" onClick={() => onRestore(v.id)}>Przywróć jako nową</button>
+            )}
+          </div>
         </div>
       ))}
-      <p className="dp-note">Przywrócenie tworzy nową wersję – historia zostaje.</p>
+      <p className="dp-note">Przywrócenie tworzy nową wersję. Z = undo, Y = redo.</p>
     </aside>
+  );
+}
+
+function HelpSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open) return null;
+  return (
+    <div className="help-sheet" role="dialog" aria-label="Sterowanie">
+      <header>
+        <h2>Sterowanie</h2>
+        <button type="button" onClick={onClose} aria-label="Zamknij">×</button>
+      </header>
+      <ul>
+        <li><kbd>LPM</kbd> wybierz / przeciągnij mapę</li>
+        <li><kbd>Scroll</kbd> zoom</li>
+        <li><kbd>PPM</kbd> obrót kamery</li>
+        <li><kbd>Shift</kbd>+<kbd>PPM</kbd> pochylenie</li>
+        <li><kbd>WASD</kbd> / strzałki — przesuwanie</li>
+        <li><kbd>Q</kbd> / <kbd>E</kbd> — obrót widoku</li>
+        <li><kbd>R</kbd> obrót budynku</li>
+        <li><kbd>Esc</kbd> anuluj</li>
+        <li><kbd>Z</kbd> / <kbd>Y</kbd> cofnij / ponów</li>
+        <li><kbd>Space</kbd> pauza</li>
+        <li><kbd>N</kbd> całe miasto</li>
+        <li><kbd>1–4</kbd> Buduj / Analiza / Zdarzenia / Historia</li>
+      </ul>
+    </div>
   );
 }
 
 /* ------------------------------------------------------------------- HUD */
 
 export function Hud({
-  sim, city, sel, tool, buildId, setBuildId, pending, report, versions,
-  onConfirmPending, onCancelPending, onDismissReport, onRestoreVersion,
-  paused, speed, trafficView, msg, pipe, flyMode, vehicle, goto,
-  layers, toggleLayer, disaster, setDisaster, roadFrom, setTool, topDown, setTopDown,
-  setPaused, setSpeed, setTrafficView, setFlyMode, setVehicle, act,
+  sim, city, sel, tool, mode, setMode, buildId, setBuildId, buildRot, rotateBuild,
+  pending, pendingDisaster, report, versions,
+  onConfirmPending, onConfirmDisaster, onCancelPending, onDismissReport, onRestoreVersion,
+  paused, speed, trafficView, msg, pipe, vehicle, goto, fitCity,
+  layers, toggleLayer, analysis, toggleAnalysis, disaster, setDisaster, roadFrom, setTool,
+  topDown, setTopDown, setPaused, setSpeed, setTrafficView, setVehicle, act,
+  mapBounds, camSample, landmarks,
 }: Props) {
   const [s, setS] = useState(() => sim.snapshot());
   const [toast, setToast] = useState('');
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState(true);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [topCollapsed, setTopCollapsed] = useState(false);
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [searchCollapsed, setSearchCollapsed] = useState(false);
-  const [catalogOpen, setCatalogOpen] = useState(false);
   const [clockOpen, setClockOpen] = useState(false);
   const [clockOffsetUi, setClockOffsetUi] = useState(0);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -503,6 +622,7 @@ export function Hud({
 
   const r = sel?.kind === 'road' ? sim.roads[sel.id] : null;
   const b = sel?.kind === 'building' ? city.buildings[sel.id] : null;
+  const pb = sel?.kind === 'player' ? sim.playerBuildings.find((x) => x.id === sel.id) : null;
 
   const status = r ? (r.closed ? 'Zamknięta przez gracza' : r.pedestrian ? 'Strefa dla pieszych (gracz)' : 'Otwarta (stan z danych)') : '';
   const acts = r ? [
@@ -518,15 +638,14 @@ export function Hud({
       run: () => act(() => sim.setPedestrian(r.edge.id, !r.pedestrian),
         r.pedestrian ? 'Ulica znów dla aut.' : `${r.edge.name} – strefa piesza (zmiana gracza).`),
     },
-    {
-      label: 'Dodaj przystanek',
-      cost: COST.stop,
-      run: () => act(() => sim.addStop(r.edge.id), 'Dodano przystanek (zmiana gracza).'),
-    },
   ] : [];
 
   const changes = sim.playerChanges();
   const selectedSpec = buildId ? CATALOG.find((c) => c.id === buildId) : null;
+  const showCatalog = mode === 'build';
+  const showAnalysis = mode === 'analyze';
+  const showEvents = mode === 'events';
+  const showHistory = mode === 'history';
 
   return (
     <>
@@ -535,7 +654,7 @@ export function Hud({
           <>
             <div className="brand">
               <b>SimCity Kraków</b>
-              <span>3D z prawdziwymi danymi OSM + ZTP</span>
+              <span>narzędzie analizy miasta · OSM + ZTP</span>
             </div>
             <div className="metrics">
               {METRICS.map((m) => (
@@ -545,7 +664,7 @@ export function Hud({
                   <Bar v={s[m.k]} bad={m.bad} />
                 </div>
               ))}
-              <div className="metric" title={`Fundusz inwestycyjny obszaru · baseline z budżetu Krakowa ${KRAKOW_BUDGET_2025.year} (${KRAKOW_BUDGET_2025.origin})`}>
+              <div className="metric" title={`Fundusz inwestycyjny · Kraków ${KRAKOW_BUDGET_2025.year}`}>
                 <span>Budżet</span>
                 <strong>{formatBudgetPln(s.budget)}</strong>
               </div>
@@ -555,7 +674,7 @@ export function Hud({
                 <button
                   type="button"
                   className="sim-clock-btn"
-                  title="Kliknij, aby przewinąć czas ±24 h"
+                  title="Przewiń czas ±24 h"
                   onClick={() => setClockOpen((v) => !v)}
                 >
                   <span className="sim-clock-label">Czas</span>
@@ -563,9 +682,7 @@ export function Hud({
                   <span className="sim-clock-meta">
                     {Math.abs(clockOffsetUi) < 0.02 && speed === 1 && !paused
                       ? 'na żywo'
-                      : paused
-                        ? 'pauza'
-                        : `${clockOffsetUi >= 0 ? '+' : ''}${clockOffsetUi.toFixed(1)} h · ${speed}×`}
+                      : paused ? 'pauza' : `${clockOffsetUi >= 0 ? '+' : ''}${clockOffsetUi.toFixed(1)} h · ${speed}×`}
                   </span>
                 </button>
                 {clockOpen && (
@@ -578,37 +695,29 @@ export function Hud({
                     <label className="clock-scrub-label">
                       −24 h
                       <input
-                        type="range"
-                        min={-24}
-                        max={24}
-                        step={0.25}
-                        value={clockOffsetUi}
+                        type="range" min={-24} max={24} step={0.25} value={clockOffsetUi}
                         onChange={(e) => {
-                          const h = Number(e.target.value);
-                          sim.setClockOffsetHours(h);
+                          sim.setClockOffsetHours(Number(e.target.value));
                           setClockOffsetUi(sim.clockOffsetHours());
                         }}
                       />
                       +24 h
                     </label>
-                    <p className="clock-scrub-hint">Flota MPK (SIMULATED) zależy od godziny. Live GTFS chowa się przy scrubbingu. 2×/5× też przesuwa zegar (max ±24 h).</p>
                   </div>
                 )}
               </div>
-              <button className={paused ? '' : 'on'} onClick={() => setPaused(!paused)}>{paused ? 'Play' : 'Pauza'}</button>
-              {[1, 2, 5].map((n) => <button key={n} className={speed === n ? 'on' : ''} onClick={() => setSpeed(n)}>{n}×</button>)}
-              <button className={topDown ? 'on' : ''} onClick={() => setTopDown(!topDown)} title="Perspektywa: z góry albo poziomo z ulicy">Perspektywa</button>
-              <button className={flyMode ? 'on' : ''} onClick={() => setFlyMode(!flyMode)} title="Tryb lotu: WASD, Q/E góra-dół, mysz rozglądanie, Shift przyspieszenie">
-                Tryb lotu
-              </button>
+              <button type="button" className={paused ? '' : 'on'} onClick={() => setPaused(!paused)}>{paused ? 'Play' : 'Pauza'}</button>
+              {[1, 2, 5].map((n) => (
+                <button key={n} type="button" className={speed === n ? 'on' : ''} onClick={() => setSpeed(n)}>{n}×</button>
+              ))}
+              <button type="button" className={topDown ? 'on' : ''} onClick={() => setTopDown(!topDown)} title="Perspektywa">Perspektywa</button>
+              <button type="button" className="help-btn" onClick={() => setHelpOpen(true)} title="Sterowanie">?</button>
             </div>
           </>
         )}
         <button
           type="button"
           className="chrome-toggle top-chrome-toggle"
-          title={topCollapsed ? 'Rozwiń pasek górny' : 'Zwiń pasek górny'}
-          aria-label={topCollapsed ? 'Rozwiń pasek górny' : 'Zwiń pasek górny'}
           onClick={() => { setTopCollapsed((v) => !v); setClockOpen(false); }}
         >
           {topCollapsed ? '▾ metryki' : '▴'}
@@ -623,38 +732,40 @@ export function Hud({
         setCollapsed={setSearchCollapsed}
       />
 
-      <div className="ui-dock" title="Pokaż / ukryj elementy UI">
-        <button
-          type="button"
-          className={searchCollapsed ? '' : 'on'}
-          onClick={() => setSearchCollapsed((v) => !v)}
-        >
+      <nav className="mode-bar" aria-label="Tryby pracy">
+        {([
+          ['build', 'Buduj', '1'],
+          ['analyze', 'Analiza', '2'],
+          ['events', 'Zdarzenia', '3'],
+          ['history', 'Historia', '4'],
+        ] as const).map(([id, label, key]) => (
+          <button
+            key={id}
+            type="button"
+            className={mode === id ? 'on' : ''}
+            onClick={() => setMode(mode === id ? null : id)}
+          >
+            {label} <small>{key}</small>
+          </button>
+        ))}
+        <button type="button" disabled={!sim.history.canUndo} onClick={() => act(() => sim.undo(), '')} title="Z">↶</button>
+        <button type="button" disabled={!sim.history.canRedo} onClick={() => act(() => sim.redo(), '')} title="Y">↷</button>
+      </nav>
+
+      <div className="ui-dock" title="Pokaż / ukryj UI">
+        <button type="button" className={searchCollapsed ? '' : 'on'} onClick={() => setSearchCollapsed((v) => !v)}>
           {searchCollapsed ? 'Pokaż szukaj' : 'Ukryj szukaj'}
         </button>
-        <button
-          type="button"
-          className={bottomCollapsed ? '' : 'on'}
-          onClick={() => setBottomCollapsed((v) => !v)}
-        >
+        <button type="button" className={bottomCollapsed ? '' : 'on'} onClick={() => setBottomCollapsed((v) => !v)}>
           {bottomCollapsed ? 'Pokaż narzędzia' : 'Ukryj narzędzia'}
         </button>
-        <button
-          type="button"
-          className={topCollapsed ? '' : 'on'}
-          onClick={() => { setTopCollapsed((v) => !v); setClockOpen(false); }}
-        >
+        <button type="button" className={topCollapsed ? '' : 'on'} onClick={() => { setTopCollapsed((v) => !v); setClockOpen(false); }}>
           {topCollapsed ? 'Pokaż metryki' : 'Ukryj metryki'}
         </button>
       </div>
 
       <div className={`col left${leftCollapsed ? ' collapsed' : ''}`}>
-        <button
-          type="button"
-          className="side-toggle left-toggle"
-          aria-label={leftCollapsed ? 'Rozwiń panel danych' : 'Zwiń panel danych'}
-          title={leftCollapsed ? 'Rozwiń panel' : 'Zwiń panel'}
-          onClick={() => setLeftCollapsed((v) => !v)}
-        >
+        <button type="button" className="side-toggle left-toggle" onClick={() => setLeftCollapsed((v) => !v)}>
           {leftCollapsed ? '›' : '‹'}
         </button>
         <div className="side-stack">
@@ -664,189 +775,141 @@ export function Hud({
       </div>
 
       <div className={`col right${rightCollapsed ? ' collapsed' : ''}`}>
-        <button
-          type="button"
-          className="side-toggle right-toggle"
-          aria-label={rightCollapsed ? 'Rozwiń panel szczegółów' : 'Zwiń panel szczegółów'}
-          title={rightCollapsed ? 'Rozwiń panel' : 'Zwiń panel'}
-          onClick={() => setRightCollapsed((v) => !v)}
-        >
+        <button type="button" className="side-toggle right-toggle" onClick={() => setRightCollapsed((v) => !v)}>
           {rightCollapsed ? '‹' : '›'}
         </button>
         <div className="side-stack">
-          <DonePanel sim={sim} />
+          {showCatalog && <CatalogPanel buildId={buildId} setBuildId={setBuildId} open />}
+          {showAnalysis && <AnalysisPanel analysis={analysis} toggle={toggleAnalysis} />}
+          {showEvents && <EventsPanel disaster={disaster} setDisaster={setDisaster} />}
+          {showHistory && <HistoryPanel versions={versions} onRestore={onRestoreVersion} />}
           {report && (
             <ConsequencePanel
               report={report}
               pending={pending}
+              pendingDisaster={pendingDisaster}
               onConfirm={onConfirmPending}
+              onConfirmDisaster={onConfirmDisaster}
               onCancel={onCancelPending}
               onDismiss={onDismissReport}
             />
           )}
-          <CatalogPanel
-            buildId={buildId}
-            setBuildId={setBuildId}
-            open={catalogOpen}
-            setOpen={setCatalogOpen}
-          />
           {vehicle && <VehicleCard vehicle={vehicle} city={city} setVehicle={setVehicle} />}
-          {r && (
+          {r && !report && (
             <aside className="panel">
               <h2>{r.edge.name || formatCoords((r.edge.ax + r.edge.bx) / 2, (r.edge.az + r.edge.bz) / 2)}</h2>
-              <p className="sub">
-                {r.edge.roadClass} · {Math.round(r.edge.len)} m · {r.edge.carAccess ? `drogi ${r.edge.roadClass}` : 'chodnik / torowisko'}
-              </p>
+              <p className="sub">{r.edge.roadClass} · {Math.round(r.edge.len)} m</p>
               <dl>
-                <dt title={ORIGIN_TITLE[r.baselineOrigin]}>DANE ŹRÓDŁOWE</dt>
-                <dd>
-                  <span className={`tag ${r.baselineOrigin.toLowerCase()}`}>{r.baselineOrigin}</span>
-                  <Bar v={r.baseline * 100} /> {pct(r.baseline)}
-                </dd>
-                <dt title="Wynik przypisania ruchu po zmianach gracza">PREDYKCJA SYMULACJI</dt>
-                <dd>
-                  <Bar v={r.predicted * 100} /> {pct(r.predicted)}
-                </dd>
-                <dt>Prędkość</dt>
-                <dd>{r.baselineSpeed ? `${(r.baselineSpeed * 3.6).toFixed(0)} km/h` : '—'}</dd>
-                <dt>Przepustowość</dt>
-                <dd>{r.capacity > 0 ? `${r.capacity} poj./15 min (${r.edge.lanesForward} pas.)` : 'Data unavailable'}</dd>
-                <dt>Komunikacja</dt>
-                <dd>{r.transit ? 'tak – trasa z GTFS' : 'nie'}{r.realStop ? ' · przystanek' : ''}</dd>
+                <dt>DANE ŹRÓDŁOWE</dt>
+                <dd><span className={`tag ${r.baselineOrigin.toLowerCase()}`}>{r.baselineOrigin}</span> {pct(r.baseline)}</dd>
+                <dt>PREDYKCJA</dt>
+                <dd>{pct(r.predicted)} <small>szacunek</small></dd>
                 <dt>Status</dt>
                 <dd className={r.closed ? 'bad' : ''}>{status}</dd>
               </dl>
               <div className="acts">
-                {acts.map((a) => <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {formatBudgetPln(a.cost)}</small> : null}</button>)}
+                {acts.map((a) => <button key={a.label} type="button" onClick={a.run}>{a.label}{a.cost ? <small> {formatBudgetPln(a.cost)}</small> : null}</button>)}
               </div>
-              <p className="note">Wartości „DANE ŹRÓDŁOWE” pochodzą z OSM/ZTP i nie zmieniają się przez grę.</p>
             </aside>
           )}
-          {b && (
+          {b && !report && (
             <aside className="panel">
-              <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynk z OSM')}</h2>
-              <p className="sub">
-                {b.name === 'zabudowa uzupełniająca'
-                  ? 'SIMULATED – uzupełnienie pustych działek przy ulicach'
-                  : 'Obrys z OpenStreetMap · wysokość z tagów OSM'}
-              </p>
+              <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynek OSM')}</h2>
+              <p className="sub">Obrys OpenStreetMap</p>
               <dl>
+                <dt>Typ</dt><dd>zabudowa / obiekt miejski</dd>
                 <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m</dd>
                 <dt>Obrys</dt><dd>{b.w.toFixed(0)} × {b.d.toFixed(0)} m</dd>
-                <dt>Kolor</dt><dd><span className="swatch" style={{ background: b.color }} /> {b.color} · dach {b.roof}</dd>
               </dl>
-              <p className="note">Jeśli brak tagu <code>height</code> / <code>building:levels</code>, przyjęto wartość domyślną dla typu budynku.</p>
+              <div className="acts">
+                <button type="button" onClick={() => goto(b.x, b.z, { kind: 'building', id: sel!.id })}>Wycentruj</button>
+              </div>
             </aside>
           )}
-          <EnvironmentCard city={city} />
-          <HistoryPanel versions={versions} onRestore={onRestoreVersion} />
-          {changes.length > 0 && (
-            <aside className="changes">
-              <h3>Zmiany gracza <small>scenariusz</small></h3>
-              {changes.slice(0, 8).map((c, i) => (
-                <div key={i} className="chg">
-                  <span>{c.roadId} · {c.name || '—'}</span>
-                  <em>{CHANGE_LABEL[c.change]}</em>
-                </div>
-              ))}
-              {changes.length > 8 && <p className="dp-note">…i {changes.length - 8} więcej</p>}
-              <p className="dp-note">Konsekwencje są <b>symulowane</b>. Dane źródłowe pozostają bez zmian.</p>
+          {pb && !report && (
+            <aside className="panel">
+              <h2>{pb.name}</h2>
+              <p className="sub">SIMULATED · budynek gracza</p>
+              <dl>
+                <dt>Typ</dt><dd>{pb.kind}</dd>
+                <dt>Mieszkańcy</dt><dd>{pb.residents}</dd>
+                <dt>Praca</dt><dd>{pb.jobs}</dd>
+                <dt>Ruch</dt><dd>szacunek modelu</dd>
+              </dl>
+              <div className="acts">
+                <button type="button" onClick={() => goto(pb.x, pb.z)}>Wycentruj</button>
+                <button type="button" className="danger" onClick={() => {
+                  act(() => sim.removePlayerBuilding(pb.id), 'Usunięto.');
+                  setVehicle(null);
+                }}>Usuń</button>
+              </div>
             </aside>
           )}
+          {!showHistory && !showCatalog && !showAnalysis && !showEvents && <EnvironmentCard city={city} />}
         </div>
       </div>
 
       {bottomCollapsed ? null : (
-      <nav className="tools">
-        <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')}>Zaznacz</button>
-        <button
-          disabled={!sim.history.canUndo}
-          title="Cofnij ostatnią decyzję"
-          onClick={() => act(() => sim.undo(), '')}
-        >
-          ↶ Cofnij <small>{sim.history.depth}</small>
-        </button>
-        <span className="toolsep" />
-        {r && acts.map((a) => (
-          <button key={a.label} onClick={a.run}>{a.label}{a.cost ? <small> {formatBudgetPln(a.cost)}</small> : null}</button>
-        ))}
-        <span className="toolsep" />
-        <button
-          className={tool === 'build' || catalogOpen ? 'on' : ''}
-          onClick={() => {
-            if (tool === 'build' && catalogOpen) { setCatalogOpen(false); setTool('select'); setBuildId(null); }
-            else { setCatalogOpen(true); setTool('build'); }
-          }}
-        >
-          Zbuduj {selectedSpec ? <small>{selectedSpec.label}</small> : <small>katalog</small>}
-        </button>
-        {([
-          ['park', 'Park (koło)', COST.park],
-          ['park-rect', 'Park (prostokąt)', COST.park],
-          ['stop-bus', 'Przystanek autobusowy', COST.stop],
-          ['stop-tram', 'Przystanek tramwajowy', COST.stopTram],
-          ['tram-track', 'Torowisko', COST.road],
-          ['road', 'Nowa droga', COST.road],
-        ] as const).map(([k, label, cost]) => (
-          <button key={k} className={tool === k ? 'on' : ''} onClick={() => { setTool(tool === k ? 'select' : k); setCatalogOpen(false); }}>
-            {label} <small>{formatBudgetPln(cost)}</small>
-          </button>
-        ))}
-        <button
-          className={tool === 'disaster' ? 'on danger' : ''}
-          onClick={() => setTool(tool === 'disaster' ? 'select' : 'disaster')}
-        >
-          Katastrofa <small>{formatBudgetPln(DISASTERS[disaster].cost)}</small>
-        </button>
-        {tool === 'disaster' && (
-          <select className="disaster-pick" value={disaster} onChange={(e) => setDisaster(e.target.value as DisasterKind)}>
-            {(Object.keys(DISASTERS) as DisasterKind[]).map((k) => (
-              <option key={k} value={k}>{DISASTERS[k].label}</option>
-            ))}
-          </select>
-        )}
-        <span className="toolsep" />
-        {(['simulated', 'baseline', 'predicted'] as TrafficView[]).map((v) => (
-          <button key={v} className={trafficView === v ? 'on' : ''} onClick={() => setTrafficView(v)}>
-            {v === 'simulated' ? 'Kolor: symulacja' : v === 'baseline' ? 'Kolor: dane' : 'Kolor: predykcja'}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="chrome-toggle bottom-chrome-toggle"
-          title="Ukryj pasek narzędzi"
-          onClick={() => setBottomCollapsed(true)}
-        >
-          Ukryj
-        </button>
-      </nav>
+        <nav className="tools">
+          {mode === 'build' && (
+            <>
+              {selectedSpec && (
+                <button type="button" className="on" onClick={rotateBuild} title="R">
+                  Obróć <small>{Math.round((buildRot * 180) / Math.PI)}°</small>
+                </button>
+              )}
+              {([
+                ['park', 'Park', COST.park],
+                ['stop-bus', 'Przyst. aut.', COST.stop],
+                ['stop-tram', 'Przyst. tram.', COST.stopTram],
+                ['tram-track', 'Torowisko', COST.road],
+                ['road', 'Droga', COST.road],
+              ] as const).map(([k, label, cost]) => (
+                <button key={k} type="button" className={tool === k ? 'on' : ''} onClick={() => setTool(tool === k ? 'build' : k)}>
+                  {label} <small>{formatBudgetPln(cost)}</small>
+                </button>
+              ))}
+            </>
+          )}
+          {mode === 'analyze' && (['simulated', 'baseline', 'predicted'] as TrafficView[]).map((v) => (
+            <button key={v} type="button" className={trafficView === v ? 'on' : ''} onClick={() => setTrafficView(v)}>
+              {v === 'simulated' ? 'Kolor: symulacja' : v === 'baseline' ? 'Kolor: dane' : 'Kolor: predykcja'}
+            </button>
+          ))}
+          <button type="button" className="chrome-toggle bottom-chrome-toggle" onClick={() => setBottomCollapsed(true)}>Ukryj</button>
+        </nav>
       )}
 
       {!bottomCollapsed && (
         <div className="hint">
-          {pending ? 'Podgląd budowy – zatwierdź lub anuluj w panelu konsekwencji.'
-            : tool === 'build' ? (selectedSpec ? `Kliknij mapę, aby zaplanować: ${selectedSpec.label}.` : 'Wybierz typ budynku z katalogu.')
-              : tool === 'park' ? 'Kliknij w teren, aby posadzić park okrągły.'
-                : tool === 'park-rect' ? (roadFrom ? 'Kliknij przeciwległy róg prostokąta.' : 'Kliknij pierwszy róg prostokątnego parku.')
-                  : tool === 'stop-bus' ? 'Kliknij przy ulicy, aby postawić przystanek autobusowy.'
-                    : tool === 'stop-tram' ? 'Kliknij przy torowisku, aby postawić przystanek tramwajowy.'
-                      : tool === 'tram-track' ? (roadFrom ? 'Kliknij drugi koniec torowiska.' : 'Kliknij początek nowego torowiska.')
-                        : tool === 'road' ? (roadFrom ? 'Kliknij drugi koniec drogi.' : 'Kliknij pierwszy koniec drogi.')
-                          : tool === 'disaster' ? `Kliknij miejsce katastrofy: ${DISASTERS[disaster].label}.`
-                            : flyMode
-                              ? 'Tryb lotu: WASD / strzałki – ruch, Q i E – wysokość, mysz – rozglądanie, Shift – przyspieszenie, kółko – zbliżenie.'
-                              : r || b || vehicle ? '' : 'UI: pasek „Ukryj…” w prawym dolnym rogu.'}
+          {pending ? 'Podgląd budowy – Anuluj / Zatwierdź w panelu.'
+            : pendingDisaster ? 'Podgląd scenariusza – Anuluj / Uruchom symulację.'
+              : mode === 'build' ? (selectedSpec ? `${selectedSpec.label}: kliknij mapę · R obraca.` : 'Wybierz budynek z katalogu.')
+                : mode === 'events' ? `Kliknij miejsce: ${DISASTERS[disaster].label}.`
+                  : mode === 'analyze' ? 'Włącz warstwy analizy w panelu.'
+                    : mode === 'history' ? 'Porównaj lub przywróć wersję jako nową.'
+                      : 'LPM = mapa · PPM = obrót · ? = sterowanie · 1–4 = tryby.'}
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}
 
+      <Minimap
+        bounds={mapBounds}
+        cam={camSample}
+        landmarks={landmarks}
+        onGoto={(x, z) => goto(x, z)}
+        onFitCity={fitCity}
+      />
+
+      <HelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} />
+
       {!bottomCollapsed && (
         <div className="foot">
-          <span className="sim">SIMULATED</span> {s.cars} aut, {s.trams} tramwajów, {s.buses} autobusów, {s.peds} pieszych ·
-          <span className="obs"> OBSERVED</span> {s.realVehicles} realnych pojazdów MPK ({s.realTrams} tram., {s.realBuses} autob.) ·
-          realnych przystanków {city.stops.length} · zmian gracza {changes.length} ·
-          wersja miasta v{versions[versions.length - 1]?.id ?? 1} ·
-          predykcja przeliczona {formatAge(s.assignmentAt)}
+          <span className="sim">SIMULATED</span> {s.cars} aut, {s.trams} tram., {s.buses} autob., {s.peds} pieszych ·
+          <span className="obs"> OBSERVED</span> {s.realVehicles} live MPK ·
+          v{versions[versions.length - 1]?.id ?? 1} · {formatAge(s.assignmentAt)}
+          {roadFrom ? ' · punkt startowy zaznaczony' : ''}
+          {changes.length ? ` · zmian ${changes.length}` : ''}
         </div>
       )}
     </>

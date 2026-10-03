@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sim as SimEngine } from './simulation/sim';
 import { pipeline, type PipelineSnapshot } from './data/pipeline';
 import type { CityData } from './data/model';
 import { toLatLon } from './data/geo';
 import { CityScene } from './scene/CityScene';
 import { defaultLayers } from './scene/layers';
-import type { FleetPose, FlyTarget, PlaceKind, PendingBuild, Sel, Tool, TrafficView } from './scene/types';
+import type {
+  FleetPose, FlyTarget, PlaceKind, PendingBuild, PendingDisaster,
+  Sel, Tool, TrafficView, WorkspaceMode,
+} from './scene/types';
 import type { DisasterKind } from './simulation/city/player';
 import { Hud } from './ui/Hud';
 import { buildSpec, type BuildId } from './simulation/city/catalog';
@@ -15,8 +18,10 @@ import {
 } from './data/cityStore';
 import { START_BUDGET_PLN } from './data/budget';
 import {
-  metricsSnapshot, previewBuild, reportAfterApply, type ConsequenceReport,
+  metricsSnapshot, previewBuild, previewDisasterReport, reportAfterApply, type ConsequenceReport,
 } from './simulation/consequences';
+import type { MiniCam } from './ui/Minimap';
+import { ANALYSIS_LAYERS } from './scene/analysis';
 
 export type { PendingBuild };
 
@@ -58,7 +63,7 @@ function toStoreSnapshot(sim: SimEngine): PlayerSnapshot {
   const s = sim.exportPlayerState();
   return {
     buildings: s.buildings.map((b) => ({
-      x: b.x, z: b.z, w: b.w, d: b.d, h: b.h,
+      x: b.x, z: b.z, w: b.w, d: b.d, h: b.h, rot: b.rot,
       kind: b.kind, name: b.name, color: b.color, roof: b.roof,
       residents: b.residents, jobs: b.jobs,
     })),
@@ -78,11 +83,20 @@ function metricsFromSim(sim: SimEngine) {
   };
 }
 
+function isTypingTarget(el: EventTarget | null) {
+  const t = el as HTMLElement | null;
+  if (!t) return false;
+  const tag = t.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+}
+
 function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   const sim = useMemo(() => new SimEngine(city), []);
   const [ver, setVer] = useState(0);
   const [tool, setTool] = useState<Tool>('select');
+  const [mode, setMode] = useState<WorkspaceMode>(null);
   const [buildId, setBuildId] = useState<BuildId | null>(null);
+  const [buildRot, setBuildRot] = useState(0);
   const [sel, setSel] = useState<Sel>(null);
   const [paused, setPaused] = useState(false);
   const [speed, setSpeed] = useState(1);
@@ -90,14 +104,20 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   const [msg, setMsg] = useState({ id: 0, text: '' });
   const [flyTarget, setFlyTarget] = useState<FlyTarget | null>(null);
   const [layers, setLayers] = useState<Set<string>>(defaultLayers);
+  const [analysis, setAnalysis] = useState<Set<string>>(new Set());
   const [vehicle, setVehicle] = useState<FleetPose | null>(null);
+  const [neoSelected, setNeoSelected] = useState(false);
   const [roadFrom, setRoadFrom] = useState<{ x: number; z: number } | null>(null);
   const [disaster, setDisaster] = useState<DisasterKind>('fire');
   const [topDown, setTopDown] = useState(false);
   const [pending, setPending] = useState<PendingBuild | null>(null);
+  const [pendingDisaster, setPendingDisaster] = useState<PendingDisaster | null>(null);
   const [report, setReport] = useState<ConsequenceReport | null>(null);
   const [versions, setVersions] = useState<CityVersion[]>([]);
   const [ready, setReady] = useState(false);
+  const [mapBounds, setMapBounds] = useState({ minX: -800, maxX: 800, minZ: -800, maxZ: 800 });
+  const [camSample, setCamSample] = useState<MiniCam | null>(null);
+  const camRef = useRef<MiniCam | null>(null);
 
   useEffect(() => {
     sim.applyCityData(pipe.city);
@@ -141,13 +161,19 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     return err;
   }, []);
 
-  const goto = useCallback((x: number, z: number, ref?: { kind: 'road' | 'building'; id: number }) => {
+  const goto = useCallback((x: number, z: number, ref?: { kind: 'road' | 'building'; id: number }, modeFly: FlyTarget['mode'] = 'focus') => {
     const ll = toLatLon(x, z);
-    setFlyTarget({ x, z, y: 60, distance: 220, token: Date.now(), lat: ll.lat, lon: ll.lon });
+    setFlyTarget({
+      x, z, y: 60, distance: modeFly === 'fit' ? 1800 : 160,
+      token: Date.now(), lat: ll.lat, lon: ll.lon, mode: modeFly,
+    });
     if (ref?.kind === 'road') setSel({ kind: 'road', id: ref.id });
     else if (ref?.kind === 'building') setSel({ kind: 'building', id: ref.id });
-    else setSel(null);
   }, []);
+
+  const fitCity = useCallback(() => {
+    goto(0, 0, undefined, 'fit');
+  }, [goto]);
 
   const persistAction = useCallback(async (label: string, type: string, reportData?: ConsequenceReport, payload?: Record<string, unknown>) => {
     const v = await appendChange(
@@ -159,11 +185,22 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     return v;
   }, [sim, refreshVersions]);
 
+  const cancelAll = useCallback(() => {
+    setPending(null);
+    setPendingDisaster(null);
+    setRoadFrom(null);
+    setBuildId(null);
+    setBuildRot(0);
+    setTool('select');
+    setReport(null);
+    setMsg((m) => ({ id: m.id + 1, text: 'Anulowano.' }));
+  }, []);
+
   const confirmPending = useCallback(async () => {
     if (!pending || !ready) return;
     const before = metricsSnapshot(sim);
     const spec = buildSpec(pending.buildId);
-    const err = sim.addStructure(pending.buildId, pending.x, pending.z);
+    const err = sim.addStructure(pending.buildId, pending.x, pending.z, pending.rot);
     if (err) {
       setMsg((m) => ({ id: m.id + 1, text: err }));
       return;
@@ -173,20 +210,75 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     setPending(null);
     setTool('select');
     setBuildId(null);
+    setBuildRot(0);
+    setMode(null);
     setVer((v) => v + 1);
     setMsg((m) => ({ id: m.id + 1, text: `Zatwierdzono: ${spec.label}` }));
     await persistAction(`Dodano: ${spec.label}`, 'build', after, {
-      buildId: pending.buildId, x: pending.x, z: pending.z,
+      buildId: pending.buildId, x: pending.x, z: pending.z, rot: pending.rot,
     });
   }, [pending, sim, persistAction, ready]);
 
+  const confirmDisaster = useCallback(async () => {
+    if (!pendingDisaster || !ready) return;
+    const before = metricsSnapshot(sim);
+    const err = act(() => sim.triggerDisaster(pendingDisaster.kind, pendingDisaster.x, pendingDisaster.z), 'Scenariusz uruchomiony.');
+    if (!err) {
+      const after = reportAfterApply(pendingDisaster.label, before, metricsSnapshot(sim));
+      setReport(after);
+      setPendingDisaster(null);
+      setTool('select');
+      setMode(null);
+      await persistAction(`Scenariusz: ${pendingDisaster.label}`, 'disaster', after);
+    }
+  }, [pendingDisaster, ready, sim, act, persistAction]);
+
   const cancelPending = useCallback(() => {
     setPending(null);
-    setMsg((m) => ({ id: m.id + 1, text: 'Anulowano planowaną budowę.' }));
+    setPendingDisaster(null);
+    setMsg((m) => ({ id: m.id + 1, text: 'Anulowano planowaną zmianę.' }));
+  }, []);
+
+  const setWorkspaceMode = useCallback((m: WorkspaceMode) => {
+    setMode((prev) => {
+      const next = prev === m ? null : m;
+      setPending(null);
+      setPendingDisaster(null);
+      setRoadFrom(null);
+      if (next === 'build') {
+        setTool('build');
+      } else if (next === 'events') {
+        setTool('disaster');
+        setBuildId(null);
+      } else if (next === 'analyze' || next === 'history' || next === null) {
+        setTool('select');
+        setBuildId(null);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleAnalysis = useCallback((id: string) => {
+    setAnalysis((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      const def = ANALYSIS_LAYERS.find((a) => a.id === id);
+      if (def?.mapLayer) {
+        setLayers((L) => {
+          const n = new Set(L);
+          if (next.has(id)) n.add(def.mapLayer!);
+          return n;
+        });
+      }
+      if (id === 'ax-traffic' || id === 'ax-infra' || id === 'ax-problem') {
+        setTrafficView('simulated');
+      }
+      return next;
+    });
   }, []);
 
   const commitPlace = (x: number, z: number, x2: number, z2: number) => {
-    if (pending) return;
+    if (pending || pendingDisaster) return;
     if (tool === 'select') {
       let best = -1, bd = Infinity;
       for (const r of sim.roads) {
@@ -195,18 +287,16 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         const d = Math.hypot(x - (e.ax + e.hx * e.len * t), z - (e.az + e.hz * e.len * t));
         if (d < bd) { bd = d; best = e.id; }
       }
-      if (best >= 0 && bd < 45) { setSel({ kind: 'road', id: best }); setVehicle(null); }
+      if (best >= 0 && bd < 45) { setSel({ kind: 'road', id: best }); setVehicle(null); setNeoSelected(false); }
+      else { setSel(null); setVehicle(null); setNeoSelected(false); }
       return;
     }
     if (tool === 'build' && buildId) {
       const spec = buildSpec(buildId);
       const near = sim.roads.reduce((best, r) => Math.max(best, r.level), 0.2);
-      setPending({
-        buildId,
-        x, z,
-        report: previewBuild(spec, near),
-      });
-      setReport(previewBuild(spec, near));
+      const rep = previewBuild(spec, near);
+      setPending({ buildId, x, z, rot: buildRot, report: rep });
+      setReport(rep);
       setMsg((m) => ({ id: m.id + 1, text: `Podgląd: ${spec.label} — zatwierdź lub anuluj.` }));
       return;
     }
@@ -220,6 +310,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         setReport(after);
         void persistAction('Dodano nową drogę', 'road', after);
         setTool('select');
+        setMode(null);
       }
       return;
     }
@@ -233,6 +324,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         setReport(after);
         void persistAction('Dodano torowisko', 'tram-track', after);
         setTool('select');
+        setMode(null);
       }
       return;
     }
@@ -243,6 +335,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         setReport(after);
         void persistAction('Posadzono park', 'park', after);
         setTool('select');
+        setMode(null);
       }
       return;
     }
@@ -259,35 +352,49 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         setReport(after);
         void persistAction('Posadzono park (prostokąt)', 'park', after);
         setTool('select');
+        setMode(null);
       }
       return;
     }
     if (tool === 'stop-bus' || tool === 'stop-tram') {
-      const mode = tool === 'stop-tram' ? 'tram' : 'bus';
-      const rid = nearestRoadId(sim, x, z, mode === 'tram');
+      const stopMode = tool === 'stop-tram' ? 'tram' : 'bus';
+      const rid = nearestRoadId(sim, x, z, stopMode === 'tram');
       if (rid < 0) {
-        setMsg((m) => ({ id: m.id + 1, text: mode === 'tram' ? 'Kliknij bliżej torowiska.' : 'Kliknij bliżej ulicy.' }));
+        setMsg((m) => ({ id: m.id + 1, text: stopMode === 'tram' ? 'Kliknij bliżej torowiska.' : 'Kliknij bliżej ulicy.' }));
         return;
       }
       const before = metricsSnapshot(sim);
-      const err = act(() => sim.addStopAt(rid, mode), mode === 'tram' ? 'Postawiono przystanek tramwajowy.' : 'Postawiono przystanek autobusowy.');
+      const err = act(() => sim.addStopAt(rid, stopMode), stopMode === 'tram' ? 'Postawiono przystanek tramwajowy.' : 'Postawiono przystanek autobusowy.');
       if (!err) {
-        const after = reportAfterApply(mode === 'tram' ? 'Przystanek tramwajowy' : 'Przystanek autobusowy', before, metricsSnapshot(sim));
+        const after = reportAfterApply(stopMode === 'tram' ? 'Przystanek tramwajowy' : 'Przystanek autobusowy', before, metricsSnapshot(sim));
         setReport(after);
-        void persistAction(`Przystanek ${mode}`, 'stop', after);
+        void persistAction(`Przystanek ${stopMode}`, 'stop', after);
         setTool('select');
+        setMode(null);
       }
       return;
     }
     if (tool === 'disaster') {
-      const before = metricsSnapshot(sim);
-      const err = act(() => sim.triggerDisaster(disaster, x, z), 'Katastrofa wywołana.');
-      if (!err) {
-        const after = reportAfterApply(`Katastrofa: ${disaster}`, before, metricsSnapshot(sim));
-        setReport(after);
-        void persistAction(`Katastrofa: ${disaster}`, 'disaster', after);
-        setTool('select');
-      }
+      const prev = sim.previewDisaster(disaster, x, z);
+      const rep = previewDisasterReport({
+        label: prev.label,
+        cost: prev.cost,
+        roads: prev.roads.length,
+        radius: prev.radius,
+        estimatedAffected: prev.estimatedAffected,
+        effects: prev.effects,
+      });
+      setPendingDisaster({
+        kind: disaster, x, z,
+        roads: prev.roads,
+        radius: prev.radius,
+        estimatedAffected: prev.estimatedAffected,
+        cost: prev.cost,
+        label: prev.label,
+        report: rep,
+      });
+      setReport(rep);
+      setMsg((m) => ({ id: m.id + 1, text: `Podgląd: ${prev.label} — uruchom lub anuluj.` }));
     }
   };
 
@@ -312,7 +419,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     setVer((x) => x + 1);
     setReport({
       title: v.label,
-      summary: 'Przywrócono wcześniejszy stan miasta. Historia wersji pozostaje kompletna.',
+      summary: 'Przywrócono wcześniejszy stan miasta jako nową wersję. Historia pozostaje kompletna.',
       observations: [{ text: `Utworzono ${v.label}.`, kind: 'info', confidence: 'wysoka' }],
       impacts: [],
       horizons: [],
@@ -324,11 +431,81 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     await refreshVersions();
   }, [sim, refreshVersions]);
 
+  // Skróty klawiszowe (nie działają w input/textarea).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'escape') {
+        e.preventDefault();
+        cancelAll();
+        setSel(null);
+        setVehicle(null);
+        setNeoSelected(false);
+        setMode(null);
+        return;
+      }
+      if (k === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        setPaused((p) => !p);
+        return;
+      }
+      if (k === 'z' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        act(() => sim.undo(), '');
+        return;
+      }
+      if (k === 'y' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        act(() => sim.redo(), '');
+        return;
+      }
+      if (k === 'r' && (tool === 'build' || pending)) {
+        e.preventDefault();
+        setBuildRot((r) => {
+          const next = (r + Math.PI / 2) % (Math.PI * 2);
+          if (pending) setPending({ ...pending, rot: next });
+          return next;
+        });
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && sel?.kind === 'player') {
+        e.preventDefault();
+        const id = sel.id;
+        act(() => sim.removePlayerBuilding(id), 'Usunięto budynek.');
+        setSel(null);
+        return;
+      }
+      if (k === 'n') {
+        e.preventDefault();
+        fitCity();
+        return;
+      }
+      if (k === '1') { e.preventDefault(); setWorkspaceMode('build'); return; }
+      if (k === '2') { e.preventDefault(); setWorkspaceMode('analyze'); return; }
+      if (k === '3') { e.preventDefault(); setWorkspaceMode('events'); return; }
+      if (k === '4') { e.preventDefault(); setWorkspaceMode('history'); return; }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [act, cancelAll, fitCity, pending, sel, setWorkspaceMode, sim, tool]);
+
   const placeKind: PlaceKind | null =
     pending ? 'build'
       : tool === 'select' || tool === 'disaster' ? null
         : tool === 'build' ? 'build'
           : (tool as PlaceKind);
+
+  const landmarks = useMemo(
+    () => city.buildings.filter((b) => b.landmark).map((b) => ({ x: b.x, z: b.z })),
+    [city.buildings],
+  );
+
+  const onCameraSample = useCallback((s: MiniCam) => {
+    camRef.current = s;
+    // throttled state update for minimap (Rig already samples ~5 Hz)
+    setCamSample(s);
+  }, []);
 
   return (
     <div className="app">
@@ -344,18 +521,28 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         layers={layers}
         placeKind={placeKind}
         buildId={pending?.buildId ?? buildId}
+        buildRot={pending?.rot ?? buildRot}
+        pendingPose={pending ? { x: pending.x, z: pending.z, rot: pending.rot } : null}
         roadFrom={roadFrom}
         selectedVehicle={vehicle?.id ?? null}
+        neoSelected={neoSelected}
         flyTo={flyTarget}
-        onSelect={(s) => { setSel(s); if (s) setVehicle(null); }}
+        disasterPreview={pendingDisaster ? { x: pendingDisaster.x, z: pendingDisaster.z, radius: pendingDisaster.radius } : null}
+        onSelect={(s) => { setSel(s); if (s) { setVehicle(null); setNeoSelected(false); } }}
         onGround={onGround}
         onCommit={commitPlace}
+        onFocusObject={(x, z) => goto(x, z, undefined, 'focus')}
         topDown={topDown}
-        onBounds={useCallback(() => undefined, [])}
+        onBounds={setMapBounds}
+        onCameraSample={onCameraSample}
         onPickVehicle={(id: string) => {
           const real = pipe.city.liveVehicles.find((v) => v.id === id);
-          if (real) setVehicle({ id: real.id, x: real.x, z: real.z, yaw: 0, ref: real.line, observed: true, info: real.headsign });
+          if (real) {
+            setNeoSelected(false);
+            setVehicle({ id: real.id, x: real.x, z: real.z, yaw: 0, ref: real.line, observed: true, info: real.headsign });
+          }
         }}
+        onPickNeo={() => { setNeoSelected(true); setVehicle(null); setSel(null); }}
       />
       <Hud
         sim={sim}
@@ -363,37 +550,65 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         ver={ver}
         sel={sel}
         tool={tool}
+        mode={mode}
+        setMode={setWorkspaceMode}
         buildId={buildId}
-        setBuildId={(id) => { setBuildId(id); setTool(id ? 'build' : 'select'); setPending(null); setRoadFrom(null); }}
+        setBuildId={(id) => {
+          setBuildId(id);
+          setTool(id ? 'build' : 'select');
+          setMode(id ? 'build' : null);
+          setPending(null);
+          setRoadFrom(null);
+          setBuildRot(0);
+        }}
+        buildRot={buildRot}
+        rotateBuild={() => setBuildRot((r) => (r + Math.PI / 2) % (Math.PI * 2))}
         paused={paused}
         speed={speed}
         trafficView={trafficView}
         msg={msg}
         pipe={pipe}
-        flyMode={false}
         vehicle={vehicle}
+        neoSelected={neoSelected}
+        setNeoSelected={setNeoSelected}
         goto={goto}
+        fitCity={fitCity}
         layers={layers}
         toggleLayer={toggleLayer}
-        setTool={(t) => { setTool(t); setRoadFrom(null); if (t !== 'build') setBuildId(null); setPending(null); }}
+        analysis={analysis}
+        toggleAnalysis={toggleAnalysis}
+        setTool={(t) => {
+          setTool(t);
+          setRoadFrom(null);
+          if (t !== 'build') setBuildId(null);
+          setPending(null);
+          setPendingDisaster(null);
+          if (t === 'build') setMode('build');
+          else if (t === 'disaster') setMode('events');
+          else setMode(null);
+        }}
         topDown={topDown}
         setTopDown={setTopDown}
         setPaused={setPaused}
         setSpeed={setSpeed}
         setTrafficView={setTrafficView}
         setVehicle={setVehicle}
-        setFlyMode={() => undefined}
         disaster={disaster}
         setDisaster={setDisaster}
         roadFrom={roadFrom}
         act={act}
         pending={pending}
+        pendingDisaster={pendingDisaster}
         report={report}
         onConfirmPending={() => void confirmPending()}
+        onConfirmDisaster={() => void confirmDisaster()}
         onCancelPending={cancelPending}
         onDismissReport={() => setReport(null)}
         versions={versions}
         onRestoreVersion={(id) => void onRestore(id)}
+        mapBounds={mapBounds}
+        camSample={camSample}
+        landmarks={landmarks}
       />
     </div>
   );
@@ -410,5 +625,3 @@ function nearestRoadId(sim: SimEngine, x: number, z: number, preferTram = false)
   }
   return bd < (preferTram ? 55 : 45) ? best : -1;
 }
-
-export interface PlaceRef { kind: 'road' | 'building'; id: number }

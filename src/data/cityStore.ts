@@ -25,6 +25,7 @@ export interface PlayerSnapshotBuilding {
   w: number;
   d: number;
   h: number;
+  rot?: number;
   kind: BuildId;
   name: string;
   color: string;
