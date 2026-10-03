@@ -51,7 +51,17 @@ Analysis results and disaster outcomes are **SIMULATED / model estimates** — n
 
 ## Screenshots
 
-> Placeholder — add stills from the live demo.
+Pitch deck: [`docs/Krakopolis-Hackathon.pptx`](./docs/Krakopolis-Hackathon.pptx) · Live: [https://krakopolis.pages.dev/](https://krakopolis.pages.dev/)
+
+| | |
+|---|---|
+| Overview + HUD | [`docs/screens/01-overview-hud.jpg`](./docs/screens/01-overview-hud.jpg) |
+| Buduj / katalog | [`docs/screens/02-buduj-katalog.jpg`](./docs/screens/02-buduj-katalog.jpg) |
+| Konsekwencje / Zatwierdź | [`docs/screens/03-konsekwencje-zatwierdz.jpg`](./docs/screens/03-konsekwencje-zatwierdz.jpg) |
+| Analiza / warstwy | [`docs/screens/04-analiza-warstwy.jpg`](./docs/screens/04-analiza-warstwy.jpg) |
+| Historia wersji | [`docs/screens/05-historia-wersji.jpg`](./docs/screens/05-historia-wersji.jpg) |
+| Minimapa OSM + Widok | [`docs/screens/06-minimapa-widok.jpg`](./docs/screens/06-minimapa-widok.jpg) |
+| Overview z minimapą | [`docs/screens/06b-overview-minimapa.jpg`](./docs/screens/06b-overview-minimapa.jpg) |
 
 | Scene | HUD / modes |
 |---|---|
