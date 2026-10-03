@@ -15,7 +15,7 @@ import { toLocal } from '../data/geo';
 import { HeightField, setHeightField } from './terrain';
 import {
   areaExtent, Buildings, Closures, DisasterLayer, MapBorder, PlayerParks, PlayerStructures,
-  RoadNetwork, Terrain, TrafficView, TransitStops, Trees,
+  RoadNetwork, StreetLamps, Terrain, TrafficView, TransitStops, Trees, WindowLights,
 } from './models/City';
 import { BusFleet, CarFleet, ObservedMarkers, PedestrianFleet, TramFleet } from './models/Fleets';
 import { PlacementGhost, type PlaceKind } from './models/Placement';
@@ -618,8 +618,12 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
           }}
         />
       )}
+      {p.layers.has('buildings') && (
+        <WindowLights key={`win-${staticKey}-${hiddenKey}`} buildings={city.buildings} hiddenKey={hiddenKey} sim={sim} />
+      )}
       <RoadNetwork key={`roads-${staticKey}`} sim={sim} ver={p.ver} sel={p.sel?.kind === 'road' ? p.sel.id : null}
         view={p.trafficView} layers={p.layers} onSelect={(id) => p.onSelect({ kind: 'road', id })} />
+      {p.layers.has('roads') && <StreetLamps key={`lamps-${staticKey}`} sim={sim} ver={p.ver} />}
       {p.layers.has('transit') && <TransitStops key={`stops-${staticKey}`} stops={city.stops} ver={p.ver} />}
       <PlayerParks parks={sim.parks} ver={p.ver} />
       <PlayerStructures
@@ -764,7 +768,7 @@ function SimFleet({ sim, layers }: { sim: Sim; layers: Set<string> }) {
           <BusFleet get={get.buses} />
         </>
       )}
-      {layers.has('traffic') && <CarFleet get={get.cars} />}
+      {layers.has('traffic') && <CarFleet get={get.cars} sim={sim} />}
     </group>
   );
 }

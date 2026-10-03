@@ -212,26 +212,44 @@ export function BusFleet({ get, capacity = 240, onPick }: { get: () => FleetPose
   );
 }
 
-export function CarFleet({ get, capacity = 320 }: { get: () => FleetPose[]; capacity?: number }) {
+export function CarFleet({ get, sim, capacity = 320 }: { get: () => FleetPose[]; sim: Sim; capacity?: number }) {
+  const hlMat = useMemo(() => new THREE.MeshBasicMaterial({
+    color: '#fff2c4', transparent: true, opacity: 0, toneMapped: false, depthWrite: false,
+  }), []);
   const parts = useMemo(() => ({
     low: mk(new RoundedBoxGeometry(4.3, 0.92, 1.84, 2, 0.22), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.32, metalness: 0.3 }), capacity),
     cab: mk(new RoundedBoxGeometry(2.2, 0.8, 1.7, 2, 0.24), new THREE.MeshStandardMaterial({ color: '#1d242b', roughness: 0.2, metalness: 0.5 }), capacity),
     wheels: mk(new THREE.BoxGeometry(3.3, 0.62, 1.94), new THREE.MeshStandardMaterial({ color: '#141618', roughness: 0.95 }), capacity, false),
-  }), [capacity]);
+    hlL: mk(new THREE.BoxGeometry(0.22, 0.18, 0.35), hlMat, capacity, false),
+    hlR: mk(new THREE.BoxGeometry(0.22, 0.18, 0.35), hlMat, capacity, false),
+  }), [capacity, hlMat]);
 
-  useFrame(() => {
+  const acc = useRef(0);
+  useFrame((_, dt) => {
     const list = get();
     const PAL = ['#d9d4c7', '#2f3640', '#b3262e', '#3b6ea5', '#e0b23a', '#6b7f6a', '#8a8f98', '#4a4f57', '#e8e6df'];
+    const night = Math.max(0, 1 - sim.dayFactor());
+    const glow = night < 0.32 ? 0 : Math.min(1, (night - 0.32) / 0.5);
     list.forEach((p, i) => {
-      const cx = Math.cos(p.yaw), sz = -Math.sin(p.yaw);
+      const fx = Math.cos(p.yaw), fz = -Math.sin(p.yaw);
+      const rx = Math.sin(p.yaw), rz = Math.cos(p.yaw);
       put(parts.low, i, p.x, 0.72, p.z, p.yaw);
-      put(parts.cab, i, p.x - cx * 0.22, 1.5, p.z - sz * 0.22, p.yaw);
+      put(parts.cab, i, p.x - fx * 0.22, 1.5, p.z - fz * 0.22, p.yaw);
       put(parts.wheels, i, p.x, 0.32, p.z, p.yaw);
+      put(parts.hlL, i, p.x + fx * 2.05 + rx * 0.58, 0.55, p.z + fz * 2.05 + rz * 0.58, p.yaw);
+      put(parts.hlR, i, p.x + fx * 2.05 - rx * 0.58, 0.55, p.z + fz * 2.05 - rz * 0.58, p.yaw);
       parts.low.setColorAt(i, COL.set(PAL[i % PAL.length]));
     });
     for (const m of Object.values(parts)) m.count = list.length;
     flush(...Object.values(parts));
     if (parts.low.instanceColor) parts.low.instanceColor.needsUpdate = true;
+
+    acc.current += dt;
+    if (acc.current >= 0.12) {
+      acc.current = 0;
+      hlMat.opacity = glow * 0.95;
+      hlMat.visible = glow > 0.02;
+    }
   });
 
   return <group>{Object.entries(parts).map(([k, m]) => <primitive key={k} object={m} />)}</group>;

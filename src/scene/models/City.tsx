@@ -552,6 +552,20 @@ export function buildingMass(buildings: { x: number; z: number; w: number; d: nu
   };
 }
 
+/** 0 = dzień (światła off), 1 = głęboka noc – z miękkim progiem o zmierzchu. */
+export function nightGlow(dayFactor: number): number {
+  const n = 1 - dayFactor;
+  if (n < 0.32) return 0;
+  return Math.min(1, (n - 0.32) / 0.5);
+}
+
+function hash01(a: number, b = 0, c = 0, d = 0): number {
+  let h = (Math.imul(a | 0, 374761393) ^ Math.imul(b | 0, 668265263)
+    ^ Math.imul(c | 0, 2147483647) ^ Math.imul(d | 0, 1442695041)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h >>> 0) % 10000) / 10000;
+}
+
 export const Buildings = memo(function Buildings({
   buildings, hiddenKey, ver, onSelect, onFocus,
 }: {
@@ -610,6 +624,171 @@ export const Buildings = memo(function Buildings({
     <group>
       <mesh ref={w} material={wallMat} castShadow receiveShadow onClick={pick} onDoubleClick={focus} />
       <mesh ref={r} material={roofMat} castShadow receiveShadow onClick={pick} onDoubleClick={focus} />
+    </group>
+  );
+});
+
+const WINDOW_TONES = ['#ffd89a', '#ffe6b8', '#ffc978', '#fff0d0', '#e8f0ff', '#ffb86a'];
+const MAX_WINDOW_LIGHTS = 9000;
+
+/** Nierównomierne światła okien – instanced quads, intensywność = f(1 − dayFactor). */
+export const WindowLights = memo(function WindowLights({
+  buildings, hiddenKey, sim,
+}: {
+  buildings: Parameters<typeof buildingMass>[0];
+  hiddenKey: string;
+  sim: Sim;
+}) {
+  const mesh = useRef<THREE.InstancedMesh>(null);
+  const mat = useMemo(() => new THREE.MeshBasicMaterial({
+    color: '#ffffff', transparent: true, opacity: 0, depthWrite: false, toneMapped: false,
+  }), []);
+  const hidden = useMemo(() => new Set<number>(), [hiddenKey]);
+
+  useLayoutEffect(() => {
+    const m = mesh.current;
+    if (!m) return;
+    let n = 0;
+    const col = new THREE.Color();
+    buildings.forEach((b, bi) => {
+      if (n >= MAX_WINDOW_LIGHTS) return;
+      if (hidden.has(bi) || b.h < 6.5 || b.w < 3.5 || b.d < 3.5) return;
+      const occupancy = hash01(bi, 17);
+      if (occupancy < 0.14) return;
+      const litBias = 0.22 + occupancy * 0.5;
+      const floors = Math.min(16, Math.max(1, Math.floor(b.h / 3.25)));
+      const rot = b.rot ?? 0;
+      const cos = Math.cos(rot), sin = Math.sin(rot);
+      const lx = cos, lz = sin;
+      const zx = -sin, zz = cos;
+      const gy = groundY(b.x, b.z);
+      const faces = [
+        { ax: lx, az: lz, nx: zx, nz: zz, ox: zx * (b.d * 0.5), oz: zz * (b.d * 0.5), len: b.w },
+        { ax: lx, az: lz, nx: -zx, nz: -zz, ox: -zx * (b.d * 0.5), oz: -zz * (b.d * 0.5), len: b.w },
+        { ax: zx, az: zz, nx: lx, nz: lz, ox: lx * (b.w * 0.5), oz: lz * (b.w * 0.5), len: b.d },
+        { ax: zx, az: zz, nx: -lx, nz: -lz, ox: -lx * (b.w * 0.5), oz: -lz * (b.w * 0.5), len: b.d },
+      ];
+      for (let fl = 0; fl < floors && n < MAX_WINDOW_LIGHTS; fl++) {
+        if (hash01(bi, fl, 91) < 0.2) continue;
+        const y = gy + 1.55 + fl * 3.25;
+        if (y > gy + b.h - 1.0) continue;
+        for (let fi = 0; fi < 4 && n < MAX_WINDOW_LIGHTS; fi++) {
+          const face = faces[fi];
+          const nWin = Math.max(1, Math.floor(face.len / 3.6));
+          for (let wi = 0; wi < nWin && n < MAX_WINDOW_LIGHTS; wi++) {
+            if (hash01(bi, fl, fi * 13 + wi, 3) > litBias) continue;
+            const t = (wi + 0.5) / nWin - 0.5;
+            const x = b.x + face.ox + face.ax * t * face.len + face.nx * 0.28;
+            const z = b.z + face.oz + face.az * t * face.len + face.nz * 0.28;
+            const yaw = Math.atan2(-face.nz, face.nx);
+            D.position.set(x, y, z);
+            D.rotation.set(0, yaw, 0);
+            D.scale.set(1.05, 1.35, 0.12);
+            D.updateMatrix();
+            m.setMatrixAt(n, D.matrix);
+            m.setColorAt(n, col.set(WINDOW_TONES[(bi + fl + wi) % WINDOW_TONES.length]));
+            n++;
+          }
+        }
+      }
+    });
+    m.count = n;
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+  }, [buildings, hidden, hiddenKey]);
+
+  const acc = useRef(0);
+  useFrame((_, dt) => {
+    acc.current += dt;
+    if (acc.current < 0.15) return;
+    acc.current = 0;
+    const g = nightGlow(sim.dayFactor());
+    mat.opacity = g * 0.92;
+    mat.visible = g > 0.02;
+  });
+
+  return (
+    <instancedMesh ref={mesh} args={[undefined, mat, MAX_WINDOW_LIGHTS]} frustumCulled={false}>
+      <boxGeometry args={[1, 1, 1]} />
+    </instancedMesh>
+  );
+});
+
+/** Lampy uliczne wzdłuż dłuższych odcinków – emissive meshes (bez PointLight per lampa). */
+export const StreetLamps = memo(function StreetLamps({ sim, ver }: { sim: Sim; ver: number }) {
+  const poles = useRef<THREE.InstancedMesh>(null);
+  const bulbs = useRef<THREE.InstancedMesh>(null);
+  const bulbMat = useMemo(() => new THREE.MeshBasicMaterial({
+    color: '#ffd9a0', transparent: true, opacity: 0, toneMapped: false, depthWrite: false,
+  }), []);
+  const poleMat = useMemo(() => new THREE.MeshStandardMaterial({
+    color: '#2a2e34', roughness: 0.85, transparent: true, opacity: 1,
+  }), []);
+
+  const spots = useMemo(() => {
+    const out: { x: number; z: number }[] = [];
+    const MAX = 2400;
+    const SPACING = 46;
+    for (const r of sim.roads) {
+      if (out.length >= MAX) break;
+      const e = r.edge;
+      if (!e.carAccess || e.len < 52) continue;
+      if (e.roadClass === 'service' || e.roadClass === 'track' || e.roadClass === 'tram') continue;
+      const w = roadWidth(r);
+      const n = Math.floor(e.len / SPACING);
+      for (let i = 1; i <= n && out.length < MAX; i++) {
+        const t = i / (n + 1);
+        const x = e.ax + (e.bx - e.ax) * t;
+        const z = e.az + (e.bz - e.az) * t;
+        const side = i % 2 === 0 ? 1 : -1;
+        const off = w * 0.5 + 1.15;
+        out.push({ x: x - e.hz * off * side, z: z + e.hx * off * side });
+      }
+    }
+    return out;
+  }, [sim.roads, ver]);
+
+  useLayoutEffect(() => {
+    const p = poles.current, b = bulbs.current;
+    if (!p || !b) return;
+    spots.forEach((s, i) => {
+      const gy = groundY(s.x, s.z);
+      D.position.set(s.x, gy + 2.7, s.z);
+      D.rotation.set(0, 0, 0);
+      D.scale.set(1, 1, 1);
+      D.updateMatrix();
+      p.setMatrixAt(i, D.matrix);
+      D.position.set(s.x, gy + 5.45, s.z);
+      D.scale.set(1, 1, 1);
+      D.updateMatrix();
+      b.setMatrixAt(i, D.matrix);
+    });
+    p.count = spots.length;
+    b.count = spots.length;
+    p.instanceMatrix.needsUpdate = true;
+    b.instanceMatrix.needsUpdate = true;
+  }, [spots]);
+
+  const acc = useRef(0);
+  useFrame((_, dt) => {
+    acc.current += dt;
+    if (acc.current < 0.15) return;
+    acc.current = 0;
+    const g = nightGlow(sim.dayFactor());
+    bulbMat.opacity = g * 0.95;
+    bulbMat.visible = g > 0.02;
+    poleMat.opacity = 0.35 + g * 0.65;
+  });
+
+  if (!spots.length) return null;
+  return (
+    <group>
+      <instancedMesh ref={poles} args={[undefined, poleMat, spots.length]} frustumCulled={false}>
+        <cylinderGeometry args={[0.07, 0.1, 5.4, 5]} />
+      </instancedMesh>
+      <instancedMesh ref={bulbs} args={[undefined, bulbMat, spots.length]} frustumCulled={false}>
+        <sphereGeometry args={[0.28, 6, 4]} />
+      </instancedMesh>
     </group>
   );
 });
