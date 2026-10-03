@@ -377,7 +377,10 @@ export function Hud({
 
       <SearchBox city={city} goto={goto} />
 
-      <DataPanel pipe={pipe} city={city} />
+      <div className="col left">
+        <DataPanel pipe={pipe} city={city} />
+        <LayersPanel layers={layers} toggle={toggleLayer} />
+      </div>
 
       {r && (
         <aside className="panel">

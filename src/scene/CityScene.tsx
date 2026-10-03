@@ -5,7 +5,7 @@
  * z torowiskami, budynki z prawdziwych obrysów, przystanki GTFS, pojazdy
  * (realne z GTFS-RT + symulowane), piesi, obiekty gracza i katastrofy.
  */
-import { memo, useEffect, useMemo, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
@@ -99,13 +99,35 @@ function Ghost({ kind, roadFrom, onCommit }: { kind: PlaceKind | null; roadFrom:
   ) : null;
 }
 
-/** Etykiety miejsc i przystanków – warstwa „mapy”. */
+/**
+ * Etykiety miejsc – warstwa „mapy".
+ * Pokazujemy tylko te, które są w zasięgu kamery (limit 90), bo każda etykieta
+ * to osobny element DOM i setki ich narastają przy każdym ruchu kamery.
+ */
 function Labels({ city, ver }: { city: CityData; ver: number }) {
-  const pois = useMemo(() => (city.pois ?? []).slice(0, 180), [city.pois]);
+  const { camera } = useThree();
+  const [near, setNear] = useState<{ x: number; z: number; name: string; category: string }[]>([]);
+  const acc = useRef(0);
+  useFrame((_, dt) => {
+    acc.current += dt;
+    if (acc.current < 1) return;
+    acc.current = 0;
+    // wybieramy miejsca najbliższe punktowi, na który patrzy kamera
+    const target = camera.getWorldDirection(new THREE.Vector3());
+    const cx = camera.position.x + target.x * 900;
+    const cz = camera.position.z + target.z * 900;
+    const pois = city.pois ?? [];
+    const scored = pois
+      .map((p) => ({ p, d: Math.hypot(p.x - cx, p.z - cz) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 90);
+    const next = scored.map((s) => ({ x: s.p.x, z: s.p.z, name: s.p.name, category: s.p.category }));
+    setNear((prev) => (prev.length === next.length && prev.every((p, i) => p.name === next[i].name && p.x === next[i].x) ? prev : next));
+  });
   void ver;
   return (
     <group>
-      {pois.map((p, i) => (
+      {near.map((p, i) => (
         <Html key={i} position={[p.x, 22, p.z]} center distanceFactor={1200} zIndexRange={[8, 0]} style={{ pointerEvents: 'none' }}>
           <div className="lbl poi"><b>{p.name}</b><span>{p.category}</span></div>
         </Html>
@@ -160,29 +182,33 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
   const extent = useMemo(() => areaExtent(city.area), [city.area]);
   const focus = useMemo<[number, number]>(() => [0, Math.min(200, extent.halfZ * 0.22)], [extent]);
   const hiddenKey = useMemo(() => sim.parks.map((x) => `${Math.round(x.x)}:${Math.round(x.z)}`).join('|'), [sim.parks, p.ver]);
+  // Dane statyczne (OSM/GTFS) mają własny znacznik czasu. Bez niego każde
+  // odświeżenie danych live tworzyłoby nowe referencje tablic i przebudowywało
+  // tysiące brył budynków oraz wielokątów terenu.
+  const staticKey = city.generatedAt;
 
   return (
-    <Canvas shadows dpr={[1, 1.4]} camera={{ fov: 45, near: 1, far: 6000, position: [focus[0] + 900, 620, focus[1] + 1100] }}>
+    <Canvas shadows dpr={[1, 1.25]} camera={{ fov: 45, near: 1, far: 6000, position: [focus[0] + 900, 620, focus[1] + 1100] }}>
       <color attach="background" args={['#cfe0ec']} />
       <fog attach="fog" args={['#cfe0ec', 1400, 5200]} />
       <hemisphereLight args={['#ffffff', '#7d7a68', 0.95]} />
       <directionalLight position={[280, 700, 240]} intensity={1.5} castShadow
-        shadow-mapSize={[1536, 1536]} shadow-camera-left={-900} shadow-camera-right={900}
-        shadow-camera-top={900} shadow-camera-bottom={-900} shadow-camera-near={1} shadow-camera-far={3000} />
+        shadow-mapSize={[1024, 1024]} shadow-camera-left={-700} shadow-camera-right={700}
+        shadow-camera-top={700} shadow-camera-bottom={-700} shadow-camera-near={1} shadow-camera-far={2600} />
       <Driver sim={sim} speed={p.speed} paused={p.paused} />
       <Rig focus={focus} flyTo={p.flyTo} />
       {p.layers.has('base') && (
-        <Terrain polygons={city.polygons} area={city.area} terrain={city.terrain}
+        <Terrain key={`terrain-${staticKey}`} polygons={city.polygons} area={city.area} terrain={city.terrain}
           onGround={p.onGround} onClear={() => p.onSelect(null)} />
       )}
-      {p.layers.has('greens') && <Trees polygons={city.polygons} ver={p.ver} />}
+      {p.layers.has('greens') && <Trees key={`trees-${staticKey}`} polygons={city.polygons} ver={p.ver} />}
       {p.layers.has('buildings') && (
-        <Buildings buildings={city.buildings} hiddenKey={hiddenKey} ver={p.ver}
+        <Buildings key={`bld-${staticKey}-${hiddenKey}`} buildings={city.buildings} hiddenKey={hiddenKey} ver={p.ver}
           onSelect={(i) => p.onSelect({ kind: 'building', id: i })} />
       )}
-      <RoadNetwork sim={sim} ver={p.ver} sel={p.sel?.kind === 'road' ? p.sel.id : null}
+      <RoadNetwork key={`roads-${staticKey}`} sim={sim} ver={p.ver} sel={p.sel?.kind === 'road' ? p.sel.id : null}
         view={p.trafficView} layers={p.layers} onSelect={(id) => p.onSelect({ kind: 'road', id })} />
-      {p.layers.has('transit') && <TransitStops stops={city.stops} ver={p.ver} />}
+      {p.layers.has('transit') && <TransitStops key={`stops-${staticKey}`} stops={city.stops} ver={p.ver} />}
       <PlayerParks parks={sim.parks} ver={p.ver} />
       <PlayerStructures sim={sim} ver={p.ver} />
       {p.layers.has('disasters') && <DisasterLayer sim={sim} ver={p.ver} />}
@@ -191,7 +217,7 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
       <SimFleet sim={sim} layers={p.layers} />
       {p.layers.has('pedestrians') && <PedestrianFleet peds={sim.peds} active={Math.round(sim.activePeds)} />}
       {p.layers.has('pedflow') && <PedFlow sim={sim} ver={p.ver} />}
-      {p.layers.has('labels') && <Labels city={city} ver={p.ver} />}
+      {p.layers.has('labels') && <Labels key={`labels-${staticKey}`} city={city} ver={p.ver} />}
       <Ghost kind={p.placeKind} roadFrom={p.roadFrom} onCommit={p.onCommit} />
     </Canvas>
   );
