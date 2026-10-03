@@ -30,6 +30,8 @@ interface Props {
   setDisaster: (d: DisasterKind) => void;
   roadFrom: { x: number; z: number } | null;
   setTool: (t: Tool) => void;
+  topDown: boolean;
+  setTopDown: (v: boolean) => void;
   setPaused: (b: boolean) => void;
   setSpeed: (n: number) => void;
   setTrafficView: (v: TrafficView) => void;
@@ -306,8 +308,8 @@ function EnvironmentCard({ city }: { city: CityData }) {
 
 export function Hud({
   sim, city, sel, tool, paused, speed, trafficView, msg, pipe, flyMode, vehicle, goto,
-  layers, toggleLayer, disaster, setDisaster, roadFrom, setTool, setPaused, setSpeed,
-  setTrafficView, setFlyMode, setVehicle, act,
+  layers, toggleLayer, disaster, setDisaster, roadFrom, setTool, topDown, setTopDown,
+  setPaused, setSpeed, setTrafficView, setFlyMode, setVehicle, act,
 }: Props) {
   const [s, setS] = useState(() => sim.snapshot());
   const [toast, setToast] = useState('');
@@ -369,6 +371,7 @@ export function Hud({
         <div className="ctrl">
           <button className={paused ? '' : 'on'} onClick={() => setPaused(!paused)}>{paused ? 'Play' : 'Pauza'}</button>
           {[1, 2, 5].map((n) => <button key={n} className={speed === n ? 'on' : ''} onClick={() => setSpeed(n)}>{n}×</button>)}
+          <button className={topDown ? 'on' : ''} onClick={() => setTopDown(!topDown)} title="Perspektywa: z góry albo poziomo z ulicy">Perspektywa</button>
           <button className={flyMode ? 'on' : ''} onClick={() => setFlyMode(!flyMode)} title="Tryb lotu: WASD, Q/E góra-dół, mysz rozglądanie, Shift przyspieszenie">
             Tryb lotu
           </button>

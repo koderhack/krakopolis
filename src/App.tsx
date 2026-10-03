@@ -59,6 +59,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   const [vehicle, setVehicle] = useState<FleetPose | null>(null);
   const [roadFrom, setRoadFrom] = useState<{ x: number; z: number } | null>(null);
   const [disaster, setDisaster] = useState<DisasterKind>('fire');
+  const [topDown, setTopDown] = useState(false);
 
   useEffect(() => {
     sim.applyCityData(pipe.city);
@@ -152,6 +153,8 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         onSelect={(s) => { setSel(s); if (s) setVehicle(null); }}
         onGround={onGround}
         onCommit={commitPlace}
+        topDown={topDown}
+        onBounds={useCallback(() => undefined, [])}
         onPickVehicle={(id: string) => {
           const real = pipe.city.liveVehicles.find((v) => v.id === id);
           if (real) setVehicle({ id: real.id, x: real.x, z: real.z, yaw: 0, ref: real.line, observed: true, info: real.headsign });
@@ -174,6 +177,8 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         layers={layers}
         toggleLayer={toggleLayer}
         setTool={setTool}
+        topDown={topDown}
+        setTopDown={setTopDown}
         setPaused={setPaused}
         setSpeed={setSpeed}
         setTrafficView={setTrafficView}

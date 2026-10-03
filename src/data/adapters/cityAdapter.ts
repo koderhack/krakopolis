@@ -92,6 +92,7 @@ export function buildCityData(b: BakedBundle): CityData {
   // żeby ściany zawsze kończyły się przed jezdnią (dane źródłowe nietknięte).
   const corridor = new RoadCorridor(b.city.nodes, roads);
   let trimmed = 0, dropped = 0;
+  const network = repairNetwork(b.city.nodes, roads);
   const buildings: SimBuilding[] = [];
   for (const x of b.city.buildings) {
     const fit = corridor.fit(x);
@@ -150,7 +151,7 @@ export function buildCityData(b: BakedBundle): CityData {
     area: b.city.area,
     generatedAt: b.manifest.generatedAt,
     nodes: b.city.nodes,
-    roads,
+    roads: network.roads,
     stops,
     routes,
     buildings,
@@ -201,6 +202,64 @@ function estimateFromRoadClass(r: { roadClass: string; lanesForward: number; car
 }
 
 /**
+ * Naprawa grafu dróg po scaleniu węzłów OSM.
+ *
+ * Po złączeniu dwujezdniowych ulic z ich osobnych osi powstają dokładnie
+ * duplikaty odcinków (ta sama para węzłów), a końce ulic goniące się w
+ * zbliżeniu zostają wiszące – na mapie wygląda to na „rozwaloną" siatkę.
+ * Naprawa jest czysto pochodna: nie ruszamy danych źródłowych.
+ */
+function repairNetwork(nodes: SimNode[], roads: SimRoad[]): { roads: SimRoad[]; duplicates: number; snapped: number } {
+  // 1. duplikaty: ta sama para węzłów – zostaje jeden (z torowiskiem, jeśli było)
+  const best = new Map<string, SimRoad>();
+  let duplicates = 0;
+  for (const r of roads) {
+    const key = r.a < r.b ? `${r.a}:${r.b}` : `${r.b}:${r.a}`;
+    const cur = best.get(key);
+    if (!cur) { best.set(key, r); continue; }
+    duplicates++;
+    if (!cur.transit && !cur.hasTram && (r.transit || r.hasTram)) best.set(key, r);
+    if ((r.lanesForward ?? 0) > (cur.lanesForward ?? 0)) best.set(key, r);
+  }
+  const out: SimRoad[] = [];
+  const seen = new Set<string>();
+  for (const r of roads) {
+    const key = r.a < r.b ? `${r.a}:${r.b}` : `${r.b}:${r.a}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(best.get(key)!);
+  }
+
+  // 2. wiszące końce doczepiamy do najbliższego węzła w promieniu 25 m
+  let snapped = 0;
+  for (let pass = 0; pass < 2; pass++) {
+    const deg = new Map<number, number>();
+    for (const r of out) { deg.set(r.a, (deg.get(r.a) ?? 0) + 1); deg.set(r.b, (deg.get(r.b) ?? 0) + 1); }
+    const loose = [...deg].filter(([, d]) => d === 1).map(([n]) => n);
+    if (!loose.length) break;
+    const SNAP = 25;
+    for (const node of loose) {
+      const p = nodes[node];
+      if (!p) continue;
+      let target = -1, bd = SNAP;
+      for (const [other, d] of deg) {
+        if (other === node || d < 2) continue;
+        const q = nodes[other];
+        if (!q) continue;
+        const dist = Math.hypot(q.x - p.x, q.z - p.z);
+        if (dist < bd) { bd = dist; target = other; }
+      }
+      if (target < 0) continue;
+      for (const r of out) {
+        if (r.a === node) { r.a = target; snapped++; }
+        else if (r.b === node) { r.b = target; snapped++; }
+      }
+    }
+  }
+  return { roads: out, duplicates, snapped };
+}
+
+/**
  * Pas drogowy wokół osi ulicy – siatka przestrzenna z półszerokościami
  * zależnymi od klasy drogi. Używana tylko do przycinania brył budynków.
  */
@@ -232,20 +291,43 @@ class RoadCorridor {
     }
   }
 
-  /** Najmniejszy odstęp od pasa drogowego (dodatni = poza jezdnią). */
-  clearance(x: number, z: number): number {
+  /** Najbliższy odcinek pasa drogowego: odstęp, punkt osi i półszerokość. */
+  private nearest(x: number, z: number): { d: number; px: number; pz: number; half: number } {
     const cx = Math.floor(x / this.cell), cz = Math.floor(z / this.cell);
-    let best = Infinity;
+    let best = { d: Infinity, px: 0, pz: 0, half: 8 };
     for (let i = -1; i <= 1; i++)
       for (let j = -1; j <= 1; j++) {
         const list = this.grid.get(`${cx + i}:${cz + j}`);
         if (!list) continue;
         for (const s of list) {
-          const d = distToSegment(x, z, s.ax, s.az, s.bx, s.bz) - s.half;
-          if (d < best) best = d;
+          const ax = s.bx - s.ax, az = s.bz - s.az;
+          const len2 = ax * ax + az * az;
+          const t = len2 > 0 ? Math.max(0, Math.min(1, ((x - s.ax) * ax + (z - s.az) * az) / len2)) : 0;
+          const px = s.ax + ax * t, pz = s.az + az * t;
+          const d = Math.hypot(x - px, z - pz);
+          if (d < best.d) best = { d, px, pz, half: s.half };
         }
       }
     return best;
+  }
+
+  /** Najmniejszy odstęp od pasa drogowego (dodatni = poza jezdnią). */
+  clearance(x: number, z: number): number {
+    const n = this.nearest(x, z);
+    return n.d - n.half;
+  }
+
+  /**
+   * Wysuwa punkt poza jezdnię, przesuwając go OD osi ulicy.
+   * To najmniej inwazyjna poprawka: budynek zachowuje rozmiar i kształt,
+   * a cofamy tylko ten narożnik, który w OSM wchodził na pas drogowy.
+   */
+  private pushOut(x: number, z: number, margin: number): [number, number] {
+    const n = this.nearest(x, z);
+    const need = n.half + margin;
+    if (n.d >= need) return [x, z];
+    const k = n.d > 1e-6 ? need / n.d : 1;
+    return [n.px + (x - n.px) * k, n.pz + (z - n.pz) * k];
   }
 
   /**
@@ -253,48 +335,46 @@ class RoadCorridor {
    * na jezdni – taki obrys z OSM odrzucamy, zamiast rysować bryłę w miejscu,
    * gdzie stoi ulica.
    */
+  /** Odstęp, jaki zostawiamy między ścianą budynku a jezdnią. */
+  private static readonly MARGIN = 1.8;
+
   fit(x: BakedBuilding): { x: number; z: number; w: number; d: number; ring?: [number, number][]; trimmed: boolean } | null {
-    const MARGIN = 1.6;
-    if (x.ring && x.ring.length >= 3) {
-      let ring = x.ring.map((p) => [p[0], p[1]] as [number, number]);
-      let cx = ring.reduce((t, p) => t + p[0], 0) / ring.length;
-      let cz = ring.reduce((t, p) => t + p[1], 0) / ring.length;
+    const MARGIN = RoadCorridor.MARGIN;
+    const src = x.ring;
+    if (src && src.length >= 3) {
+      const ring = src.map((p) => this.pushOut(p[0], p[1], MARGIN));
+      let area = 0;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        area += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+      }
+      area = Math.abs(area / 2);
+      const area0 = Math.abs(ringArea(src));
+      // obrys wtopiony w jezdnię (np. błąd geometrii OSM) – nie rysujemy go wcale
+      if (area < area0 * 0.45 || area < 12) return null;
       let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (const [px, pz] of ring) { minX = Math.min(minX, px); maxX = Math.max(maxX, px); minZ = Math.min(minZ, pz); maxZ = Math.max(maxZ, pz); }
-      const area0 = Math.abs(ringArea(ring));
-      const touched = ring.some(([px, pz]) => this.clearance(px, pz) < MARGIN);
-      if (!touched) {
-        return { x: cx, z: cz, w: maxX - minX, d: maxZ - minZ, ring, trimmed: false };
-      }
-      // malejemy obrys do środka, aż cały znajdzie się poza jezdnią
-      let scale = 1;
-      for (let pass = 0; pass < 8; pass++) {
-        scale *= 0.88;
-        ring = x.ring.map((p) => [cx + (p[0] - cx) * scale, cz + (p[1] - cz) * scale] as [number, number]);
-        const ok = ring.every(([px, pz]) => this.clearance(px, pz) >= MARGIN);
-        if (ok) break;
-      }
-      const area1 = Math.abs(ringArea(ring));
-      if (area1 < area0 * 0.3) return null; // bryła wtopiona w ulicę – odrzucamy
-      minX = Infinity; maxX = -Infinity; minZ = Infinity; maxZ = -Infinity;
-      for (const [px, pz] of ring) { minX = Math.min(minX, px); maxX = Math.max(maxX, px); minZ = Math.min(minZ, pz); maxZ = Math.max(maxZ, pz); }
-      return { x: cx, z: cz, w: maxX - minX, d: maxZ - minZ, ring, trimmed: true };
+      const cx = ring.reduce((t, p) => t + p[0], 0) / ring.length;
+      const cz = ring.reduce((t, p) => t + p[1], 0) / ring.length;
+      const touched = ring.some(([px, pz]) => this.clearance(px, pz) < MARGIN - 0.01);
+      return { x: cx, z: cz, w: maxX - minX, d: maxZ - minZ, ring, trimmed: touched };
     }
-    // brak obrysu – prostokąt z wymiarów z OSM
-    const corners = (w: number, d: number): [number, number][] => [
-      [x.x - w / 2, x.z - d / 2], [x.x + w / 2, x.z - d / 2],
-      [x.x + w / 2, x.z + d / 2], [x.x - w / 2, x.z + d / 2],
+
+    // Brak obrysu w OSM – prostokąt z wymiarów. Traktujemy go jak obrys
+    // czterech punktów i korygujemy ten sam sposobem (wysuwamy tylko narożnik
+    // wchodzący na jezdnię), więc budynek nie traci rozmiaru.
+    const box: [number, number][] = [
+      [x.x - x.w / 2, x.z - x.d / 2], [x.x + x.w / 2, x.z - x.d / 2],
+      [x.x + x.w / 2, x.z + x.d / 2], [x.x - x.w / 2, x.z + x.d / 2],
     ];
-    let w = x.w, d = x.d;
-    if (!corners(w, d).some(([px, pz]) => this.clearance(px, pz) < MARGIN)) {
-      return { x: x.x, z: x.z, w, d, trimmed: false };
-    }
-    for (let pass = 0; pass < 8; pass++) {
-      w *= 0.88; d *= 0.88;
-      if (!corners(w, d).some(([px, pz]) => this.clearance(px, pz) < MARGIN)) break;
-    }
-    if (w < Math.max(3, x.w * 0.3)) return null;
-    return { x: x.x, z: x.z, w, d, trimmed: true };
+    const fixed = box.map(([px, pz]) => this.pushOut(px, pz, MARGIN));
+    const a1 = Math.abs(ringArea(fixed)), a0 = x.w * x.d;
+    if (a1 < Math.max(12, a0 * 0.45)) return null;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const [px, pz] of fixed) { minX = Math.min(minX, px); maxX = Math.max(maxX, px); minZ = Math.min(minZ, pz); maxZ = Math.max(maxZ, pz); }
+    const cx = fixed.reduce((t, q) => t + q[0], 0) / 4;
+    const cz = fixed.reduce((t, q) => t + q[1], 0) / 4;
+    const touched = fixed.some(([px, pz]) => this.clearance(px, pz) < MARGIN - 0.01);
+    return { x: cx, z: cz, w: maxX - minX, d: maxZ - minZ, ring: fixed, trimmed: touched };
   }
 }
 

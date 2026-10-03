@@ -39,6 +39,9 @@ export interface CitySceneProps {
   onGround: (x: number, z: number) => void;
   onCommit: (x: number, z: number, x2: number, z2: number) => void;
   onPickVehicle: (id: string, kind: 'tram' | 'bus') => void;
+  /** Podgląd z góry zamiast perspektywy „z miasta”. */
+  topDown: boolean;
+  onBounds: (b: { minX: number; maxX: number; minZ: number; maxZ: number }) => void;
 }
 
 function Driver({ sim, speed, paused }: { sim: Sim; speed: number; paused: boolean }) {
@@ -46,43 +49,171 @@ function Driver({ sim, speed, paused }: { sim: Sim; speed: number; paused: boole
   return null;
 }
 
-function Rig({ focus, flyTo }: { focus: [number, number]; flyTo: CitySceneProps['flyTo'] }) {
-  const { camera } = useThree();
+/**
+ * Obsługa kamery.
+ *
+ * Jednym źródłem prawdy jest `OrbitControls.target` – wszystkie ruchy kamery
+ * (przeciąganie, klawiatura, lot do miejsca) ustawiają ten sam punkt patrzenia.
+ * Wcześniej lot do miejsca kręcił kamerą przez `lookAt`, ale nie ruszał
+ * targetu, więc po animacji sterowanie natychmiast „ściągało” kamerę z powrotem
+ * i widok nie zatrzymywał się tam, gdzie kliknięto.
+ */
+function Rig({
+  focus, flyTo, topDown, onBounds,
+}: {
+  focus: [number, number];
+  flyTo: CitySceneProps['flyTo'];
+  topDown: boolean;
+  onBounds: (b: { minX: number; maxX: number; minZ: number; maxZ: number }) => void;
+}) {
+  const { camera, gl } = useThree();
   const ctl = useRef<any>(null);
-  const t = useRef(0), done = useRef(false);
-  const from = useMemo(() => new THREE.Vector3(focus[0] + 900, 620, focus[1] + 1100), [focus]);
-  const to = useMemo(() => new THREE.Vector3(focus[0] + 120, 220, focus[1] + 240), [focus]);
+  const intro = useRef(0);
+  const tween = useRef<{
+    from: THREE.Vector3; to: THREE.Vector3;
+    fromT: THREE.Vector3; toT: THREE.Vector3; t: number; dur: number;
+  } | null>(null);
+  const keys = useRef<Record<string, boolean>>({});
+  const dist = useRef(1500);
+
+  /** Ustawienia „z lotu ptaka” – niższy kąt, bardziej perspektywiczny. */
+  const HOME = useMemo(() => new THREE.Vector3(focus[0] + 470, 260, focus[1] + 620), [focus]);
+  const FAR = useMemo(() => new THREE.Vector3(focus[0] + 1500, 1250, focus[1] + 2050), [focus]);
+  const center = useMemo(() => new THREE.Vector3(focus[0], 0, focus[1]), [focus]);
+
   useEffect(() => {
-    camera.position.copy(from);
-    camera.lookAt(focus[0], 0, focus[1]);
-  }, [camera, from, focus]);
+    camera.position.copy(FAR);
+    camera.lookAt(center);
+    if (ctl.current) { ctl.current.target.copy(center); ctl.current.update(); }
+    onBounds({ minX: focus[0] - 2600, maxX: focus[0] + 2600, minZ: focus[1] - 2600, maxZ: focus[1] + 2600 });
+  }, []);
+
+  // Start: płynne zbliżenie z wysoka do perspektywy „z miasta”.
+  useEffect(() => {
+    tween.current = {
+      from: FAR.clone(), to: HOME.clone(),
+      fromT: center.clone(), toT: center.clone(),
+      t: 0, dur: 4.2,
+    };
+    const t = setTimeout(() => { intro.current = 1; }, 4400);
+    return () => clearTimeout(t);
+  }, []);
+
+  /**
+   * Lot do miejsca: cel dostajeemy na środku ekranu, a kamera ląduje w
+   * podanym odstępie i pod wskazanym kątem – dzięki temu widać dokładnie to,
+   * czego szukaliśmy, a nie „gdzieś w okolicy”.
+   */
   useEffect(() => {
     if (!flyTo) return;
-    done.current = true;
-    const target = new THREE.Vector3(flyTo.x, 0, flyTo.z);
-    const start = camera.position.clone();
-    const end = new THREE.Vector3(flyTo.x + 110, 200, flyTo.z + 210);
-    const t0 = performance.now();
-    const step = () => {
-      const k = Math.min(1, (performance.now() - t0) / 1400);
-      const e = 1 - Math.pow(1 - k, 3);
-      camera.position.lerpVectors(start, end, e);
-      camera.lookAt(target);
-      if (k < 1) requestAnimationFrame(step);
+    const toT = new THREE.Vector3(flyTo.x, 0, flyTo.z);
+    // kierunek patrzenia zostawiamy, ale odległość i wysokość ustawiamy od nowa
+    const dir = new THREE.Vector3().subVectors(camera.position, toT);
+    dir.y = 0;
+    if (dir.lengthSq() < 1) dir.set(0.6, 0, 0.8);
+    dir.normalize().multiplyScalar(topDown ? 40 : 135);
+    const to = toT.clone().add(new THREE.Vector3(dir.x, topDown ? 520 : 165, dir.z));
+    tween.current = {
+      from: camera.position.clone(), to,
+      fromT: ctl.current ? ctl.current.target.clone() : center.clone(),
+      toT, t: 0, dur: 1.15,
     };
-    step();
   }, [flyTo?.token]);
+
+  // Przełączenie perspektywy: wysoka kamera patrząca w dół.
+  useEffect(() => {
+    if (!intro.current) return;
+    const toT = ctl.current ? ctl.current.target.clone() : center.clone();
+    tween.current = {
+      from: camera.position.clone(),
+      to: toT.clone().add(new THREE.Vector3(0.01, topDown ? 900 : 260, topDown ? 320 : 640)),
+      fromT: toT, toT, t: 0, dur: 0.9,
+    };
+  }, [topDown]);
+
+  // Klawiatura: WASD / strzałki przesuwają punkt patrzenia, Q/E – wysokość.
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+      keys.current[e.code] = true;
+    };
+    const up = (e: KeyboardEvent) => { keys.current[e.code] = false; };
+    const blur = () => { keys.current = {}; };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', blur);
+    };
+  }, []);
+
   useFrame((_, dt) => {
-    if (done.current) return;
-    t.current = Math.min(1, t.current + dt / 5);
-    camera.position.lerpVectors(from, to, 1 - Math.pow(1 - t.current, 3));
-    if (ctl.current) { ctl.current.target.set(focus[0], 0, focus[1]); ctl.current.update(); }
-    if (t.current >= 1) done.current = true;
+    const c = ctl.current;
+    if (!c) return;
+
+    const tw = tween.current;
+    if (tw) {
+      tw.t = Math.min(1, tw.t + dt / tw.dur);
+      const e = 1 - Math.pow(1 - tw.t, 4);
+      camera.position.lerpVectors(tw.from, tw.to, e);
+      c.target.lerpVectors(tw.fromT, tw.toT, e);
+      c.update();
+      if (tw.t >= 1) { tween.current = null; c.enabled = true; }
+      dist.current = camera.position.distanceTo(c.target);
+      return;
+    }
+
+    // ruch klawiaturą w płaszczyźnie widoku
+    const k = keys.current;
+    const fwd = (k.KeyW ? 1 : 0) - (k.KeyS ? 1 : 0) - (k.ArrowUp ? 1 : 0) + (k.ArrowDown ? 1 : 0);
+    const strafe = (k.KeyD ? 1 : 0) - (k.KeyA ? 1 : 0) + (k.ArrowRight ? 1 : 0) - (k.ArrowLeft ? 1 : 0);
+    const lift = (k.KeyE ? 1 : 0) - (k.KeyQ ? 1 : 0);
+    const zoom = (k.Equal || k.NumpadAdd ? 1 : 0) - (k.Minus || k.NumpadSubtract ? 1 : 0);
+    if (fwd || strafe || lift || zoom) {
+      c.enabled = false; // klawiatura nie walczy z „wycieczkom" użytkownika
+      const speed = (k.ShiftLeft || k.ShiftRight ? 2.2 : 1) * Math.max(60, dist.current) * dt * 1.6;
+      const f = new THREE.Vector3();
+      camera.getWorldDirection(f);
+      f.y = 0;
+      if (f.lengthSq() < 1e-6) f.set(0, 0, -1);
+      f.normalize();
+      const rgt = new THREE.Vector3(f.z, 0, -f.x);
+      const move = new THREE.Vector3()
+        .addScaledVector(f, -fwd * speed)
+        .addScaledVector(rgt, strafe * speed);
+      if (move.lengthSq() > 0) {
+        camera.position.add(move);
+        c.target.add(move);
+      }
+      if (lift) {
+        const dy = lift * Math.max(40, dist.current) * dt * 1.4;
+        camera.position.y = Math.max(14, camera.position.y + dy);
+      }
+      if (zoom) {
+        const f2 = new THREE.Vector3().subVectors(camera.position, c.target);
+        const len = Math.max(30, f2.length() + (zoom > 0 ? 1 : -1) * Math.max(40, dist.current * 1.1) * dt * 1.8);
+        f2.setLength(Math.min(3000, Math.max(25, len)));
+        camera.position.copy(c.target).add(f2);
+      }
+      c.update();
+      c.enabled = true;
+    }
+    dist.current = camera.position.distanceTo(c.target);
   });
+
   return (
-    <OrbitControls ref={ctl} makeDefault enableDamping dampingFactor={0.09}
-      maxPolarAngle={Math.PI * 0.49} minDistance={18} maxDistance={2600}
-      target={[focus[0], 0, focus[1]]} onStart={() => { done.current = true; }} />
+    <OrbitControls
+      ref={ctl} makeDefault enableDamping dampingFactor={0.075}
+      minPolarAngle={0.08} maxPolarAngle={Math.PI * 0.495}
+      minDistance={25} maxDistance={3400}
+      zoomSpeed={0.9} rotateSpeed={0.62} panSpeed={0.9} screenSpacePanning={false}
+      mouseButtons={{ LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }}
+      touches={{ ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }}
+      target={[focus[0], 0, focus[1]]}
+      onStart={() => { tween.current = null; ctl.current && (ctl.current.enabled = true); }}
+    />
   );
 }
 
@@ -196,7 +327,7 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
         shadow-mapSize={[1024, 1024]} shadow-camera-left={-700} shadow-camera-right={700}
         shadow-camera-top={700} shadow-camera-bottom={-700} shadow-camera-near={1} shadow-camera-far={2600} />
       <Driver sim={sim} speed={p.speed} paused={p.paused} />
-      <Rig focus={focus} flyTo={p.flyTo} />
+      <Rig focus={focus} flyTo={p.flyTo} topDown={p.topDown} onBounds={p.onBounds} />
       {p.layers.has('base') && (
         <Terrain key={`terrain-${staticKey}`} polygons={city.polygons} area={city.area} terrain={city.terrain}
           onGround={p.onGround} onClear={() => p.onSelect(null)} />
