@@ -1385,21 +1385,21 @@ export class Sim {
       (r) => !r.destroyed && r.edge.carAccess,
     );
     const roads = hit.map((r) => r.edge.id);
-    let residents = 0;
-    for (const b of this.playerBuildings) {
-      if (Math.hypot(b.x - cx, b.z - cz) <= def.radius) residents += b.residents;
-    }
-    if (target?.buildingKind === 'player' && target.buildingId != null) {
-      const b = this.playerBuildings.find((p) => p.id === target.buildingId);
-      if (b) residents = Math.max(residents, b.residents);
-    }
-    const estOsm = Math.round(def.radius * def.radius * 0.00035);
+    const estimatedAffected = estimateAffectedResidents({
+      cx, cz,
+      radius: def.radius,
+      osmBuildings: this.city?.buildings ?? [],
+      playerBuildings: this.playerBuildings,
+      target: target?.buildingId != null
+        ? { buildingId: target.buildingId, buildingKind: target.buildingKind }
+        : undefined,
+    });
     return {
       roads,
       radius: def.radius,
       label: def.label,
       cost: def.cost,
-      estimatedAffected: residents + estOsm,
+      estimatedAffected,
       effects: DISASTER_EFFECTS[kind],
       cx, cz,
       targetBuildingId: target?.buildingId,
@@ -1499,12 +1499,32 @@ export class Sim {
       if (b) { sx = b.x; sz = b.z; targetLabel = targetLabel ?? (b.name || 'Budynek'); }
     }
 
+    // Powódź: niższy teren → większy zasięg; wyższy → mniejszy.
+    let radius = def.radius;
+    let count = def.count;
+    if (kind === 'flood' || kind === 'rain') {
+      const rel = terrainRelativeHeight(this.city?.terrain ?? null, sx, sz);
+      // rel < 0 = poniżej średniej lokalnej → więcej wody
+      const factor = 1 - rel * 0.35;
+      radius = Math.round(def.radius * Math.max(0.55, Math.min(1.35, factor)));
+      count = Math.max(2, Math.round(def.count * Math.max(0.55, Math.min(1.35, factor))));
+    }
+
     const hit = pickRoads(
       this.roads.filter((r) => !r.built),
-      sx, sz, def.radius, def.count,
+      sx, sz, radius, count,
       (r) => !r.destroyed && r.edge.carAccess,
     );
     const roads = hit.map((r) => r.edge.id);
+    const affectedResidents = estimateAffectedResidents({
+      cx: sx, cz: sz,
+      radius,
+      osmBuildings: this.city?.buildings ?? [],
+      playerBuildings: this.playerBuildings,
+      target: target?.buildingId != null
+        ? { buildingId: target.buildingId, buildingKind: target.buildingKind }
+        : undefined,
+    });
     const d: DisasterState = {
       id: this.nextDisasterId++,
       kind,
@@ -1519,6 +1539,7 @@ export class Sim {
       targetBuildingId: target?.buildingId,
       targetBuildingKind: target?.buildingKind,
       targetLabel,
+      affectedResidents,
       lastNotice: kind === 'fire' ? 'Wykryto pożar.' : kind === 'flood' ? 'Wykryto zagrożenie powodziowe.' : `${def.label} — start.`,
     };
     this.pushNotice(d.lastNotice!);

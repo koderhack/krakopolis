@@ -84,6 +84,7 @@ function toStoreSnapshot(sim: SimEngine): PlayerSnapshot {
       targetBuildingId: d.targetBuildingId,
       targetBuildingKind: d.targetBuildingKind,
       targetLabel: d.targetLabel,
+      affectedResidents: d.affectedResidents,
     })),
   };
 }
@@ -169,6 +170,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
             targetBuildingId: d.targetBuildingId,
             targetBuildingKind: d.targetBuildingKind,
             targetLabel: d.targetLabel,
+            affectedResidents: d.affectedResidents,
           })),
         });
         setVer((v) => v + 1);
@@ -317,7 +319,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
       const before = metricsSnapshot(sim);
       const err = act(
         () => sim.triggerDisaster(disaster, sx, sz, target),
-        `${prev.label} rozpoczęty.`,
+        `${prev.label} rozpoczęty · ~${prev.estimatedAffected} osób.`,
       );
       if (err) return;
       const after = reportAfterApply(prev.label, before, metricsSnapshot(sim));
@@ -570,6 +572,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         targetBuildingId: d.targetBuildingId,
         targetBuildingKind: d.targetBuildingKind,
         targetLabel: d.targetLabel,
+        affectedResidents: d.affectedResidents,
       })),
     });
     setVer((x) => x + 1);
