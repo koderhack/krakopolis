@@ -514,13 +514,16 @@ function geometryFaceCount(geo: THREE.BufferGeometry): number {
 /** Chunk: początek faceIndex w scalonym meshu → indeks budynku. */
 export type FaceChunk = { start: number; id: number };
 
-export function resolveFaceChunk(chunks: FaceChunk[], faceIndex: number): number {
+export function resolveFaceChunk(chunks: FaceChunk[], faceIndex: number, totalFaces?: number): number {
   if (faceIndex < 0 || chunks.length === 0) return -1;
+  if (totalFaces != null && faceIndex >= totalFaces) return -1;
   let lo = 0, hi = chunks.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     const start = chunks[mid].start;
-    const end = mid + 1 < chunks.length ? chunks[mid + 1].start : Number.POSITIVE_INFINITY;
+    const end = mid + 1 < chunks.length
+      ? chunks[mid + 1].start
+      : (totalFaces ?? Number.POSITIVE_INFINITY);
     if (faceIndex < start) hi = mid - 1;
     else if (faceIndex >= end) lo = mid + 1;
     else return chunks[mid].id;
@@ -533,6 +536,8 @@ export type BuildingMass = {
   roofs: THREE.BufferGeometry;
   wallChunks: FaceChunk[];
   roofChunks: FaceChunk[];
+  wallFaceCount: number;
+  roofFaceCount: number;
 };
 
 export function buildingMass(buildings: { x: number; z: number; w: number; d: number; h: number; color: string; roof: string; landmark: boolean; rot?: number; ring?: [number, number][] }[], hidden: Set<number>): BuildingMass {
@@ -625,6 +630,8 @@ export function buildingMass(buildings: { x: number; z: number; w: number; d: nu
     roofs: roofs.length ? mergeGeometries(roofs, false) ?? new THREE.BufferGeometry() : new THREE.BufferGeometry(),
     wallChunks,
     roofChunks,
+    wallFaceCount: wallFaces,
+    roofFaceCount: roofFaces,
   };
 }
 
@@ -811,8 +818,9 @@ export const Buildings = memo(function Buildings({
 
   const resolveHit = (e: ThreeEvent<MouseEvent>, kind: 'wall' | 'roof'): number => {
     const chunks = kind === 'wall' ? mass.wallChunks : mass.roofChunks;
+    const total = kind === 'wall' ? mass.wallFaceCount : mass.roofFaceCount;
     if (e.faceIndex != null) {
-      const byFace = resolveFaceChunk(chunks, e.faceIndex);
+      const byFace = resolveFaceChunk(chunks, e.faceIndex, total);
       if (byFace >= 0) return byFace;
     }
     return pickBuildingAtPoint(buildings, e.point.x, e.point.y, e.point.z, hidden);
