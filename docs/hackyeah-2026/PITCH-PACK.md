@@ -183,6 +183,20 @@ Miasta to systemy. Jedna decyzja — nowe osiedle, zamknięta ulica, pożar — 
 
 ---
 
+
+### Nowe screeny (2026-10-04, live z krakopolis.pages.dev)
+
+| Plik | Co widać | Slajd |
+|------|----------|-------|
+| `assets/s4-build.jpg` | Budowa: preview „Mały blok / kamienica” + panel konsekwencji | 4 |
+| `assets/s6-fire.jpg` | Aktywny **POŻAR** (płomienie + strefa) | 6 lewy |
+| `assets/s6-flood.jpg` | Aktywna **POWÓDŹ** (woda + etykieta POWÓDŹ) | 6 prawy |
+| `docs/screens/10-powodz-aktywna.jpg` | Powódź z panelem POWÓDŹ ROZPOCZĘTY | źródło |
+| `docs/screens/11-pozar-aktywny.jpg` | Pożar z panelem POŻAR ROZPOCZĘTY | źródło |
+| `docs/screens/13-budowa-preview.jpg` | Preview budowy przed Enter | źródło |
+
+Slajd 6 pokazuje **FIRE + FLOOD** obok siebie (events, nie animacje).
+
 ## Ścieżka do pliku
 
 ```
