@@ -720,11 +720,18 @@ function BuildingHoverRing({
     return g;
   }, [positions]);
   useLayoutEffect(() => () => geo.dispose(), [geo]);
-  return (
-    <line_ geometry={geo} raycast={() => null}>
-      <lineBasicMaterial color="#b8e0ff" transparent opacity={0.7} toneMapped={false} />
-    </line_>
-  );
+  const line = useMemo(() => {
+    const mat = new THREE.LineBasicMaterial({
+      color: '#b8e0ff', transparent: true, opacity: 0.7, toneMapped: false,
+    });
+    const obj = new THREE.Line(geo, mat);
+    obj.raycast = () => undefined;
+    return obj;
+  }, [geo]);
+  useLayoutEffect(() => () => {
+    (line.material as THREE.Material).dispose();
+  }, [line]);
+  return <primitive object={line} />;
 }
 
 function BuildingHighlight({
