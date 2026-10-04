@@ -1500,8 +1500,8 @@ export class Sim {
     }
 
     // Powódź: niższy teren → większy zasięg; wyższy → mniejszy.
-    let radius = def.radius;
-    let count = def.count;
+    let radius = def.radius as number;
+    let count = def.count as number;
     if (kind === 'flood' || kind === 'rain') {
       const rel = terrainRelativeHeight(this.city?.terrain ?? null, sx, sz);
       // rel < 0 = poniżej średniej lokalnej → więcej wody
