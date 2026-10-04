@@ -753,7 +753,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   }, []);
 
   return (
-    <div className={`app${tool === 'disaster' ? ' aiming-disaster' : ''}`}>
+    <div className={`app${tool === 'disaster' ? ' aiming-disaster' : ''}${tool === 'select' && !mode ? ' selecting-building' : ''}`}>
       <CityScene
         sim={sim}
         city={pipe.city}

@@ -1115,6 +1115,9 @@ button.danger { border-color: #a33; background: rgba(200, 60, 50, 0.22); }
 .app.aiming-disaster canvas {
   cursor: crosshair;
 }
+.app.selecting-building canvas {
+  cursor: crosshair;
+}
 .disaster-aim-lbl {
   position: absolute;
   left: 0;

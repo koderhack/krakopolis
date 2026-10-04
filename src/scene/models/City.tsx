@@ -693,6 +693,40 @@ function pickBuildingAtPoint(
   return best;
 }
 
+function BuildingHoverRing({
+  building,
+}: {
+  building: Parameters<typeof buildingMass>[0][number];
+}) {
+  const positions = useMemo(() => {
+    const ring: [number, number][] = building.ring && building.ring.length >= 3
+      ? building.ring
+      : orientedBoxRing(building);
+    const gy = groundY(building.x, building.z) + building.h + 0.9;
+    const arr = new Float32Array((ring.length + 1) * 3);
+    for (let i = 0; i < ring.length; i++) {
+      arr[i * 3] = ring[i][0];
+      arr[i * 3 + 1] = gy;
+      arr[i * 3 + 2] = ring[i][1];
+    }
+    arr[ring.length * 3] = ring[0][0];
+    arr[ring.length * 3 + 1] = gy;
+    arr[ring.length * 3 + 2] = ring[0][1];
+    return arr;
+  }, [building]);
+  const geo = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    return g;
+  }, [positions]);
+  useLayoutEffect(() => () => geo.dispose(), [geo]);
+  return (
+    <line_ geometry={geo} raycast={() => null}>
+      <lineBasicMaterial color="#b8e0ff" transparent opacity={0.7} toneMapped={false} />
+    </line_>
+  );
+}
+
 function BuildingHighlight({
   building, active,
 }: {
@@ -701,13 +735,15 @@ function BuildingHighlight({
 }) {
   const geos = useMemo(
     () => (building ? buildingHighlightGeos(building) : null),
-    [building],
+    // IDENTITY: współrzędne + wymiary (unikamy rebuildu przy tej samej bryle)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [building?.x, building?.z, building?.w, building?.d, building?.h, building?.rot, building?.ring, building?.landmark],
   );
   useLayoutEffect(() => () => {
     geos?.shell.dispose();
     geos?.edges.dispose();
   }, [geos]);
-  if (!geos) return null;
+  if (!building || !geos) return null;
   return (
     <group>
       <mesh geometry={geos.shell} raycast={() => null}>
@@ -791,7 +827,10 @@ export const Buildings = memo(function Buildings({
   const onPointer = (kind: 'wall' | 'roof') => (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
     const best = resolveHit(e as unknown as ThreeEvent<MouseEvent>, kind);
-    setHover(best >= 0 ? best : null);
+    setHover((prev) => {
+      if (best < 0) return prev == null ? prev : null;
+      return prev === best ? prev : best;
+    });
   };
 
   const selected = sel != null && sel >= 0 ? buildings[sel] ?? null : null;
@@ -820,7 +859,7 @@ export const Buildings = memo(function Buildings({
         onDoubleClick={focus('roof')}
         onPointerMove={onPointer('roof')}
       />
-      {hovered && <BuildingHighlight building={hovered} active={false} />}
+      {hovered && <BuildingHoverRing building={hovered} />}
       {selected && <BuildingHighlight building={selected} active />}
     </group>
   );

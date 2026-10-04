@@ -1141,7 +1141,7 @@ export function Hud({
                 <dt>Status</dt><dd>postawiony · edytowalny</dd>
               </dl>
               <div className="acts">
-                <button type="button" onClick={() => goto(pb.x, pb.z, { kind: 'player', id: pb.id })}>Wycentruj</button>
+                <button type="button" onClick={() => goto(pb.x, pb.z)}>Wycentruj</button>
                 <button type="button" onClick={() => setSel(null)}>Odznacz</button>
                 <button type="button" className="danger" title="Delete ×2" onClick={() => {
                   act(() => sim.removePlayerBuilding(pb.id), `Zburzono: ${pb.name}.`);
@@ -1165,7 +1165,12 @@ export function Hud({
                 : tool === 'stop-bus' || tool === 'stop-tram' ? 'Kliknij miejsce przystanku na mapie.'
                   : 'Wybierz obiekt z katalogu po prawej.')
               : mode === 'events' ? `WYBIERZ MIEJSCE · ${DISASTERS[disaster].label} — kliknij budynek lub teren · Esc anuluje.`
-                : mode === 'analyze' ? 'Wybierz natężenie — mapa koloruje drogi. Kliknij ulicę, by zobaczyć parametry.'
+                : mode === 'analyze' ? (b || pb
+                  ? `Wybrany budynek aktywny w Analizie · Esc odznacza.`
+                  : 'Wybierz natężenie — mapa koloruje drogi. Kliknij budynek lub ulicę.')
+                  : tool === 'select' ? (b || pb
+                    ? 'Budynek zaznaczony · Esc zamyka · Delete×2 usuwa Twój budynek.'
+                    : 'WYBIERZ BUDYNEK — kliknij bryłę na mapie · Esc anuluje.')
                     : 'LPM = pan · PPM = obrót · ? = sterowanie · Krakopolis = historia.'}
       </div>
       {toast && <div className="toast">{toast}</div>}
