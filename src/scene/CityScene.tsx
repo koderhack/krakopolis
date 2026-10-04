@@ -20,6 +20,7 @@ import {
 import { BusFleet, CarFleet, ObservedMarkers, PedestrianFleet, TramFleet } from './models/Fleets';
 import { PlacementGhost, type PlaceKind } from './models/Placement';
 import type { FleetPose, FlyTarget, Sel } from './types';
+import type { TrafficIntensityId } from './analysis';
 import { LandmarkExtras } from './models/Landmarks';
 import { NeoAgent } from './models/Neo';
 
@@ -33,6 +34,8 @@ export interface CitySceneProps {
   sel: Sel;
   trafficView: TrafficView;
   layers: Set<string>;
+  analyzeActive?: boolean;
+  trafficIntensity?: TrafficIntensityId;
   placeKind: PlaceKind | null;
   buildId?: import('../simulation/city/catalog').BuildId | null;
   buildRot?: number;
@@ -720,6 +723,7 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
       {p.layers.has('trees') && <Trees key={`trees-${staticKey}`} polygons={city.polygons} area={city.area} ver={p.ver} />}
       {p.layers.has('buildings') && (
         <Buildings key={`bld-${staticKey}-${hiddenKey}`} buildings={city.buildings} hiddenKey={hiddenKey} ver={p.ver}
+          sel={p.sel?.kind === 'building' ? p.sel.id : null}
           onSelect={(i) => p.onSelect({ kind: 'building', id: i })}
           onFocus={(i) => {
             const b = city.buildings[i];
@@ -732,6 +736,8 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
       )}
       <RoadNetwork key={`roads-${staticKey}`} sim={sim} ver={p.ver} sel={p.sel?.kind === 'road' ? p.sel.id : null}
         view={p.trafficView} layers={p.layers}
+        analyzeActive={p.analyzeActive}
+        trafficIntensity={p.trafficIntensity}
         onSelect={(id) => {
           if (p.disasterAiming) return;
           p.onSelect({ kind: 'road', id });

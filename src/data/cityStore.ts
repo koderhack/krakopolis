@@ -63,6 +63,9 @@ export interface PlayerSnapshot {
     targetBuildingKind?: 'osm' | 'player';
     targetLabel?: string;
     affectedResidents?: number;
+    radius?: number;
+    affectedBuildings?: { id: number; kind: 'osm' | 'player' }[];
+    consequences?: string[];
   }[];
 }
 

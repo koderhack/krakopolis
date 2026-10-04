@@ -23,7 +23,10 @@ import {
   metricsSnapshot, previewBuild, previewDisasterReport, reportAfterApply, type ConsequenceReport,
 } from './simulation/consequences';
 import type { MiniCam } from './ui/Minimap';
-import { ANALYSIS_LAYERS } from './scene/analysis';
+import {
+  DEFAULT_TRAFFIC_INTENSITY,
+  type TrafficIntensityId,
+} from './scene/analysis';
 
 export type { PendingBuild };
 
@@ -121,7 +124,8 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   const [msg, setMsg] = useState({ id: 0, text: '' });
   const [flyTarget, setFlyTarget] = useState<FlyTarget | null>(null);
   const [layers, setLayers] = useState<Set<string>>(defaultLayers);
-  const [analysis, setAnalysis] = useState<Set<string>>(new Set());
+  const [trafficIntensity, setTrafficIntensity] = useState<TrafficIntensityId>(DEFAULT_TRAFFIC_INTENSITY);
+  const layersBeforeAnalyze = useRef<Set<string> | null>(null);
   const [vehicle, setVehicle] = useState<FleetPose | null>(null);
   const [neoSelected, setNeoSelected] = useState(false);
   const [roadFrom, setRoadFrom] = useState<{ x: number; z: number } | null>(null);
@@ -390,24 +394,29 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     });
   }, []);
 
-  const toggleAnalysis = useCallback((id: string) => {
-    setAnalysis((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      const def = ANALYSIS_LAYERS.find((a) => a.id === id);
-      if (def?.mapLayer) {
-        setLayers((L) => {
-          const n = new Set(L);
-          if (next.has(id)) n.add(def.mapLayer!);
-          return n;
-        });
-      }
-      if (id === 'ax-traffic' || id === 'ax-infra' || id === 'ax-problem') {
-        setTrafficView('simulated');
-      }
-      return next;
-    });
-  }, []);
+  const analyzeActiveRef = useRef(false);
+  useEffect(() => {
+    if (mode === 'analyze') {
+      if (analyzeActiveRef.current) return;
+      analyzeActiveRef.current = true;
+      setLayers((L) => {
+        layersBeforeAnalyze.current = new Set(L);
+        const n = new Set(L);
+        n.add('roads');
+        n.add('traffic');
+        return n;
+      });
+      setTrafficView('simulated');
+      setTrafficIntensity(DEFAULT_TRAFFIC_INTENSITY);
+      return;
+    }
+    if (!analyzeActiveRef.current) return;
+    analyzeActiveRef.current = false;
+    const snap = layersBeforeAnalyze.current;
+    layersBeforeAnalyze.current = null;
+    if (snap) setLayers(snap);
+  }, [mode]);
+
 
   const commitPlace = (x: number, z: number, x2: number, z2: number) => {
     if (pending || pendingDisaster) return;
@@ -755,6 +764,8 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         sel={sel}
         trafficView={trafficView}
         layers={layers}
+        analyzeActive={mode === 'analyze'}
+        trafficIntensity={trafficIntensity}
         placeKind={placeKind}
         buildId={pending?.buildId ?? buildId}
         buildRot={pending?.rot ?? buildRot}
@@ -825,8 +836,8 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         fitCity={fitCity}
         layers={layers}
         toggleLayer={toggleLayer}
-        analysis={analysis}
-        toggleAnalysis={toggleAnalysis}
+        trafficIntensity={trafficIntensity}
+        setTrafficIntensity={setTrafficIntensity}
         setTool={(t) => {
           setTool(t);
           setRoadFrom(null);

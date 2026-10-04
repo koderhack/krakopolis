@@ -11,6 +11,12 @@ import type { Sim, RoadSim } from '../../simulation/sim';
 import type { CityData, SimPolygon } from '../../data/model';
 import { toLocal } from '../../data/geo';
 import { asphaltTex, grassTex, groundTex, groundY, HeightField, pavementTex } from '../terrain';
+import {
+  intensityColor,
+  sampleRoadTraffic,
+  type TrafficIntensityId,
+} from '../analysis';
+import { distToRing } from '../../simulation/city/catalog';
 
 const D = new THREE.Object3D();
 const C = new THREE.Color();
@@ -269,6 +275,14 @@ const PALETTE = {
   sel: new THREE.Color('#5cc8ff'),
 };
 
+const INTENSITY_COLORS: Record<TrafficIntensityId, THREE.Color> = {
+  'very-low': new THREE.Color(intensityColor('very-low')),
+  low: new THREE.Color(intensityColor('low')),
+  medium: new THREE.Color(intensityColor('medium')),
+  high: new THREE.Color(intensityColor('high')),
+  'very-high': new THREE.Color(intensityColor('very-high')),
+};
+
 export function roadWidth(r: RoadSim): number {
   const e = r.edge;
   if (e.roadClass === 'tram') return 4.6;
@@ -287,13 +301,15 @@ export function roadWidth(r: RoadSim): number {
 }
 
 export const RoadNetwork = memo(function RoadNetwork({
-  sim, ver, sel, view, layers, onSelect, onDisasterPick,
+  sim, ver, sel, view, layers, analyzeActive, trafficIntensity, onSelect, onDisasterPick,
 }: {
   sim: Sim;
   ver: number;
   sel: number | null;
   view: TrafficView;
   layers: Set<string>;
+  analyzeActive?: boolean;
+  trafficIntensity?: TrafficIntensityId;
   onSelect: (id: number) => void;
   /** Gdy ustawione – klik w drogę przekazuje dokładny punkt (katastrofa). */
   onDisasterPick?: (x: number, z: number) => void;
@@ -403,23 +419,33 @@ export const RoadNetwork = memo(function RoadNetwork({
   const paint = () => {
     const m = deck.current, mk = marks.current;
     if (!m || !mk) return;
+    const intensity = trafficIntensity ?? 'medium';
+    const analysisOn = !!analyzeActive;
     roads.forEach((r, i) => {
-      let level = r.level;
-      if (view === 'baseline') level = r.baseline;
-      else if (view === 'predicted') level = r.predicted;
-      const k = Math.max(0, Math.min(1, level));
       let t: THREE.Color;
+      let markLevel = r.level;
       if (r.destroyed || r.closure === 'closed') t = PALETTE.closed;
       else if (r.edge.roadClass === 'tram') t = PALETTE.rail;
       else if (r.edge.roadClass === 'footway' || r.edge.roadClass === 'path' || r.edge.roadClass === 'steps') t = PALETTE.footway;
       else if (!r.edge.carAccess) t = PALETTE.pedestrian;
-      else if (k < 0.4) t = C.lerpColors(PALETTE.empty, PALETTE.light, k / 0.4);
-      else if (k < 0.7) t = C.lerpColors(PALETTE.light, PALETTE.mid, (k - 0.4) / 0.3);
-      else t = C.lerpColors(PALETTE.mid, PALETTE.heavy, (k - 0.7) / 0.3);
-      if (sel === i) t = C.lerpColors(t, PALETTE.sel, 0.6);
-      if (!layers.has('traffic') && r.edge.carAccess) t = C.lerpColors(PALETTE.empty, t, 0.25);
+      else if (analysisOn) {
+        const sample = sampleRoadTraffic(r, view, intensity);
+        t = INTENSITY_COLORS[sample.level.id];
+        markLevel = sample.display;
+      } else {
+        let level = r.level;
+        if (view === 'baseline') level = r.baseline;
+        else if (view === 'predicted') level = r.predicted;
+        markLevel = level;
+        const k = Math.max(0, Math.min(1, level));
+        if (k < 0.4) t = C.lerpColors(PALETTE.empty, PALETTE.light, k / 0.4);
+        else if (k < 0.7) t = C.lerpColors(PALETTE.light, PALETTE.mid, (k - 0.4) / 0.3);
+        else t = C.lerpColors(PALETTE.mid, PALETTE.heavy, (k - 0.7) / 0.3);
+        if (!layers.has('traffic')) t = C.lerpColors(PALETTE.empty, t, 0.25);
+      }
+      if (sel === i) t = C.lerpColors(t, PALETTE.sel, 0.55);
       m.setColorAt(i, t);
-      const center = r.edge.carAccess && r.edge.lanesForward >= 2 && level > 0.35;
+      const center = r.edge.carAccess && r.edge.lanesForward >= 2 && markLevel > 0.35;
       mk.setColorAt(i, center ? PALETTE.mid : C.set('#000000'));
     });
     m.instanceColor!.needsUpdate = true;
@@ -431,7 +457,7 @@ export const RoadNetwork = memo(function RoadNetwork({
     acc.current += dt;
     if (acc.current > 0.35) { acc.current = 0; paint(); }
   });
-  useLayoutEffect(paint, [sel, ver, view, roads, layers]);
+  useLayoutEffect(paint, [sel, ver, view, roads, layers, analyzeActive, trafficIntensity]);
 
   if (!layers.has('roads')) return null;
 
@@ -467,6 +493,9 @@ export const RoadNetwork = memo(function RoadNetwork({
  * Bryły z PRAWDZIWYCH obrysów OSM, scalone w jeden bufor (jeden draw call
  * dla tysięcy budynków). Elewacje mają UV liczone z obwodu i wysokości, więc
  * okna powtarzają się jak rzędki kondygnacji.
+ *
+ * Przy merge zachowujemy mapę face→building (kolejność geometrii = kolejność face),
+ * żeby picking wskazywał dokładnie kliknięty budynek, nie najbliższy środek.
  */
 function orientedBoxRing(b: { x: number; z: number; w: number; d: number; rot?: number }): [number, number][] {
   const rot = b.rot ?? 0;
@@ -476,9 +505,43 @@ function orientedBoxRing(b: { x: number; z: number; w: number; d: number; rot?: 
     .map(([u, v]) => [b.x + u * c - v * s, b.z + u * s + v * c]);
 }
 
-export function buildingMass(buildings: { x: number; z: number; w: number; d: number; h: number; color: string; roof: string; landmark: boolean; rot?: number; ring?: [number, number][] }[], hidden: Set<number>) {
+function geometryFaceCount(geo: THREE.BufferGeometry): number {
+  if (geo.index) return Math.floor(geo.index.count / 3);
+  const n = geo.attributes.position?.count ?? 0;
+  return Math.floor(n / 3);
+}
+
+/** Chunk: początek faceIndex w scalonym meshu → indeks budynku. */
+export type FaceChunk = { start: number; id: number };
+
+export function resolveFaceChunk(chunks: FaceChunk[], faceIndex: number): number {
+  if (faceIndex < 0 || chunks.length === 0) return -1;
+  let lo = 0, hi = chunks.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const start = chunks[mid].start;
+    const end = mid + 1 < chunks.length ? chunks[mid + 1].start : Number.POSITIVE_INFINITY;
+    if (faceIndex < start) hi = mid - 1;
+    else if (faceIndex >= end) lo = mid + 1;
+    else return chunks[mid].id;
+  }
+  return -1;
+}
+
+export type BuildingMass = {
+  walls: THREE.BufferGeometry;
+  roofs: THREE.BufferGeometry;
+  wallChunks: FaceChunk[];
+  roofChunks: FaceChunk[];
+};
+
+export function buildingMass(buildings: { x: number; z: number; w: number; d: number; h: number; color: string; roof: string; landmark: boolean; rot?: number; ring?: [number, number][] }[], hidden: Set<number>): BuildingMass {
   const walls: THREE.BufferGeometry[] = [];
   const roofs: THREE.BufferGeometry[] = [];
+  const wallChunks: FaceChunk[] = [];
+  const roofChunks: FaceChunk[] = [];
+  let wallFaces = 0;
+  let roofFaces = 0;
   buildings.forEach((b, idx) => {
     if (hidden.has(idx)) return;
     const ring: [number, number][] = b.ring && b.ring.length >= 3 ? b.ring : orientedBoxRing(b);
@@ -523,6 +586,8 @@ export function buildingMass(buildings: { x: number; z: number; w: number; d: nu
     for (let i = 0; i < pos.count; i++) { cols[i * 3] = col.r; cols[i * 3 + 1] = col.g; cols[i * 3 + 2] = col.b; }
     geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
     geo.computeVertexNormals();
+    wallChunks.push({ start: wallFaces, id: idx });
+    wallFaces += geometryFaceCount(geo);
     walls.push(geo);
 
     // Dach: niski „czepiec” jak na mapie (nie wysoki ostrosłup)
@@ -551,12 +616,39 @@ export function buildingMass(buildings: { x: number; z: number; w: number; d: nu
     const rcols = new Float32Array(rp.count * 3);
     for (let i = 0; i < rp.count; i++) { rcols[i * 3] = rc.r; rcols[i * 3 + 1] = rc.g; rcols[i * 3 + 2] = rc.b; }
     roof.setAttribute('color', new THREE.BufferAttribute(rcols, 3));
+    roofChunks.push({ start: roofFaces, id: idx });
+    roofFaces += geometryFaceCount(roof);
     roofs.push(roof);
   });
   return {
     walls: walls.length ? mergeGeometries(walls, false) ?? new THREE.BufferGeometry() : new THREE.BufferGeometry(),
     roofs: roofs.length ? mergeGeometries(roofs, false) ?? new THREE.BufferGeometry() : new THREE.BufferGeometry(),
+    wallChunks,
+    roofChunks,
   };
+}
+
+/** Geometria podświetlenia jednego budynku (outline + lekka bryła) – bez zmiany bazowego meshu. */
+function buildingHighlightGeos(b: {
+  x: number; z: number; w: number; d: number; h: number; rot?: number; ring?: [number, number][]; landmark?: boolean;
+}): { shell: THREE.BufferGeometry; edges: THREE.BufferGeometry } | null {
+  const ring: [number, number][] = b.ring && b.ring.length >= 3 ? b.ring : orientedBoxRing(b);
+  if (ring.length < 3) return null;
+  const shape = new THREE.Shape();
+  ring.forEach(([x, z], i) => (i === 0 ? shape.moveTo(x, -z) : shape.lineTo(x, -z)));
+  shape.closePath();
+  const gy = groundY(b.x, b.z);
+  const rh = b.landmark ? Math.max(1.4, Math.min(4.5, b.h * 0.18)) : Math.max(0.55, Math.min(2.8, b.h * 0.1));
+  let geo: THREE.BufferGeometry;
+  try {
+    geo = new THREE.ExtrudeGeometry(shape, { depth: b.h + rh, bevelEnabled: false, curveSegments: 1, steps: 1 });
+  } catch { return null; }
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < pos.count; i++) pos.setY(i, pos.getY(i) + gy);
+  geo.computeVertexNormals();
+  const edges = new THREE.EdgesGeometry(geo, 28);
+  return { shell: geo, edges };
 }
 
 /** 0 = dzień (światła off), 1 = głęboka noc – włącza się już o zmierzchu. */
@@ -573,17 +665,86 @@ function hash01(a: number, b = 0, c = 0, d = 0): number {
   return ((h >>> 0) % 10000) / 10000;
 }
 
+/** Fallback gdy brak faceIndex: containment pierścienia + wysokość (głębokość), nie najbliższy środek. */
+function pickBuildingAtPoint(
+  buildings: Parameters<typeof buildingMass>[0],
+  x: number, y: number, z: number,
+  hidden: Set<number>,
+): number {
+  let best = -1;
+  let bestScore = Infinity;
+  for (let i = 0; i < buildings.length; i++) {
+    if (hidden.has(i)) continue;
+    const b = buildings[i];
+    const ring: [number, number][] = b.ring && b.ring.length >= 3 ? b.ring : orientedBoxRing(b);
+    const dist = distToRing(x, z, ring);
+    // ściana: punkt lekko poza pierścieniem; dach/wnętrze: 0
+    if (dist > 2.4) continue;
+    const gy = groundY(b.x, b.z);
+    const rh = b.landmark ? Math.max(1.4, Math.min(4.5, b.h * 0.18)) : Math.max(0.55, Math.min(2.8, b.h * 0.1));
+    const y0 = gy - 0.6;
+    const y1 = gy + b.h + rh + 0.8;
+    if (y < y0 || y > y1) continue;
+    // Preferuj containment; potem dopasowanie wysokości (bliżej środka kondygnacji = lepsze przy nakładaniu).
+    const midY = gy + b.h * 0.5;
+    const score = dist * 40 + Math.abs(y - midY) * 0.15;
+    if (score < bestScore) { bestScore = score; best = i; }
+  }
+  return best;
+}
+
+function BuildingHighlight({
+  building, active,
+}: {
+  building: Parameters<typeof buildingMass>[0][number] | null;
+  active: boolean;
+}) {
+  const geos = useMemo(
+    () => (building ? buildingHighlightGeos(building) : null),
+    [building],
+  );
+  useLayoutEffect(() => () => {
+    geos?.shell.dispose();
+    geos?.edges.dispose();
+  }, [geos]);
+  if (!geos) return null;
+  return (
+    <group>
+      <mesh geometry={geos.shell} raycast={() => null}>
+        <meshBasicMaterial
+          color={active ? '#5cc8ff' : '#9ad4ff'}
+          transparent
+          opacity={active ? 0.16 : 0.08}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </mesh>
+      <lineSegments geometry={geos.edges} raycast={() => null}>
+        <lineBasicMaterial
+          color={active ? '#7ed0ff' : '#b8e0ff'}
+          transparent
+          opacity={active ? 0.95 : 0.55}
+          depthTest
+          toneMapped={false}
+        />
+      </lineSegments>
+    </group>
+  );
+}
+
 export const Buildings = memo(function Buildings({
-  buildings, hiddenKey, ver, onSelect, onFocus,
+  buildings, hiddenKey, ver, sel, onSelect, onFocus,
 }: {
   buildings: Parameters<typeof buildingMass>[0];
   hiddenKey: string;
   ver: number;
+  sel?: number | null;
   onSelect: (i: number) => void;
   onFocus?: (i: number) => void;
 }) {
   const w = useRef<THREE.Mesh>(null);
   const r = useRef<THREE.Mesh>(null);
+  const [hover, setHover] = useState<number | null>(null);
   const hidden = useMemo(() => new Set<number>(), [hiddenKey]);
   const mass = useMemo(() => buildingMass(buildings, hidden), [buildings, hiddenKey]);
   const facade = useMemo(() => facadeTexture(), []);
@@ -605,32 +766,62 @@ export const Buildings = memo(function Buildings({
     if (m) m.geometry.computeBoundingSphere();
   }, [ver]);
 
-  const findNear = (x: number, z: number) => {
-    let best = -1, bd = Infinity;
-    buildings.forEach((b, i) => {
-      const d = Math.hypot(x - b.x, z - b.z);
-      if (d < bd) { bd = d; best = i; }
-    });
-    return best >= 0 && bd < Math.max(30, buildings[best].w) ? best : -1;
+  const resolveHit = (e: ThreeEvent<MouseEvent>, kind: 'wall' | 'roof'): number => {
+    const chunks = kind === 'wall' ? mass.wallChunks : mass.roofChunks;
+    if (e.faceIndex != null) {
+      const byFace = resolveFaceChunk(chunks, e.faceIndex);
+      if (byFace >= 0) return byFace;
+    }
+    return pickBuildingAtPoint(buildings, e.point.x, e.point.y, e.point.z, hidden);
   };
 
-  const pick = (e: ThreeEvent<MouseEvent>) => {
+  const pick = (kind: 'wall' | 'roof') => (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
     if (e.delta > 4) return;
-    const best = findNear(e.point.x, e.point.z);
+    const best = resolveHit(e, kind);
     if (best >= 0) onSelect(best);
   };
 
-  const focus = (e: ThreeEvent<MouseEvent>) => {
+  const focus = (kind: 'wall' | 'roof') => (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
-    const best = findNear(e.point.x, e.point.z);
+    const best = resolveHit(e, kind);
     if (best >= 0) onFocus?.(best);
   };
 
+  const onPointer = (kind: 'wall' | 'roof') => (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    const best = resolveHit(e as unknown as ThreeEvent<MouseEvent>, kind);
+    setHover(best >= 0 ? best : null);
+  };
+
+  const selected = sel != null && sel >= 0 ? buildings[sel] ?? null : null;
+  const hovered = hover != null && hover !== sel ? buildings[hover] ?? null : null;
+
   return (
-    <group>
-      <mesh ref={w} material={wallMat} castShadow receiveShadow onClick={pick} onDoubleClick={focus} />
-      <mesh ref={r} material={roofMat} castShadow receiveShadow onClick={pick} onDoubleClick={focus} />
+    <group
+      onPointerMissed={() => setHover(null)}
+      onPointerOut={() => setHover(null)}
+    >
+      <mesh
+        ref={w}
+        material={wallMat}
+        castShadow
+        receiveShadow
+        onClick={pick('wall')}
+        onDoubleClick={focus('wall')}
+        onPointerMove={onPointer('wall')}
+      />
+      <mesh
+        ref={r}
+        material={roofMat}
+        castShadow
+        receiveShadow
+        onClick={pick('roof')}
+        onDoubleClick={focus('roof')}
+        onPointerMove={onPointer('roof')}
+      />
+      {hovered && <BuildingHighlight building={hovered} active={false} />}
+      {selected && <BuildingHighlight building={selected} active />}
     </group>
   );
 });
@@ -922,6 +1113,9 @@ export function PlayerStructures({
         const flat = b.kind === 'park' || b.kind === 'parking';
         const rot = b.rot ?? 0;
         const selected = sel === b.id;
+        const gy = groundY(b.x, b.z);
+        const bodyH = flat ? 0.5 : b.h;
+        const bodyY = gy + (flat ? 0.35 : b.h / 2 + 0.4);
         return (
           <group
             key={b.id}
@@ -929,30 +1123,42 @@ export function PlayerStructures({
             onDoubleClick={(e) => { e.stopPropagation(); onFocus?.(b.id); }}
           >
             <mesh
-              position={[b.x, groundY(b.x, b.z) + (flat ? 0.35 : b.h / 2 + 0.4), b.z]}
+              position={[b.x, bodyY, b.z]}
               rotation-y={rot}
               castShadow receiveShadow
             >
-              <boxGeometry args={[b.w, flat ? 0.5 : b.h, b.d]} />
-              <meshStandardMaterial color={selected ? '#7ec8ff' : b.color} roughness={0.7} />
+              <boxGeometry args={[b.w, bodyH, b.d]} />
+              <meshStandardMaterial color={b.color} roughness={0.7} />
             </mesh>
             {!flat && (
-              <mesh position={[b.x, groundY(b.x, b.z) + b.h + 1.0, b.z]} rotation-y={rot} castShadow>
+              <mesh position={[b.x, gy + b.h + 1.0, b.z]} rotation-y={rot} castShadow>
                 <boxGeometry args={[b.w + 1.2, Math.min(2.2, b.h * 0.12), b.d + 1.2]} />
                 <meshStandardMaterial color={b.roof} roughness={0.6} />
               </mesh>
             )}
             {b.kind === 'school' && (
-              <mesh position={[b.x, groundY(b.x, b.z) + b.h + 3.2, b.z]}>
+              <mesh position={[b.x, gy + b.h + 3.2, b.z]}>
                 <boxGeometry args={[2.2, 2.2, 0.3]} />
                 <meshStandardMaterial color="#f2c230" />
               </mesh>
             )}
             {b.kind === 'hospital' && (
-              <mesh position={[b.x, groundY(b.x, b.z) + b.h + 3.5, b.z]}>
+              <mesh position={[b.x, gy + b.h + 3.5, b.z]}>
                 <boxGeometry args={[3.5, 1.2, 0.35]} />
                 <meshStandardMaterial color="#e8eef4" emissive="#ffffff" emissiveIntensity={0.15} />
               </mesh>
+            )}
+            {selected && (
+              <group>
+                <mesh position={[b.x, bodyY, b.z]} rotation-y={rot} raycast={() => null}>
+                  <boxGeometry args={[b.w + 0.4, bodyH + 0.4, b.d + 0.4]} />
+                  <meshBasicMaterial color="#5cc8ff" transparent opacity={0.14} depthWrite={false} toneMapped={false} />
+                </mesh>
+                <mesh position={[b.x, bodyY, b.z]} rotation-y={rot} raycast={() => null}>
+                  <boxGeometry args={[b.w + 0.45, bodyH + 0.45, b.d + 0.45]} />
+                  <meshBasicMaterial color="#7ed0ff" wireframe transparent opacity={0.9} depthWrite={false} toneMapped={false} />
+                </mesh>
+              </group>
             )}
           </group>
         );
@@ -1021,6 +1227,44 @@ export function DisasterLayer({ sim, ver }: { sim: Sim; ver: number }) {
                 depthWrite={false}
               />
             </mesh>
+          );
+        }
+        if (d.kind === 'airRaid') {
+          const r = 14 + 28 * d.intensity;
+          return (
+            <group key={`src-air-${d.id}`}>
+              <mesh position={[d.cx, y + 0.4, d.cz]} rotation-x={-Math.PI / 2}>
+                <ringGeometry args={[r * 0.55, r * 0.72, 40]} />
+                <meshBasicMaterial color="#f0c040" transparent opacity={0.55 + 0.25 * d.intensity} toneMapped={false} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+              <mesh position={[d.cx, y + 0.45, d.cz]} rotation-x={-Math.PI / 2}>
+                <ringGeometry args={[r * 0.88, r, 40]} />
+                <meshBasicMaterial color="#e8a020" transparent opacity={0.4 + 0.3 * d.intensity} toneMapped={false} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+              <mesh position={[d.cx, y + 0.35, d.cz]} rotation-x={-Math.PI / 2}>
+                <circleGeometry args={[5.5, 24]} />
+                <meshBasicMaterial color="#ffd060" transparent opacity={0.35 * d.intensity} toneMapped={false} depthWrite={false} />
+              </mesh>
+            </group>
+          );
+        }
+        if (d.kind === 'contamination') {
+          const r = 16 + 32 * d.intensity;
+          return (
+            <group key={`src-contam-${d.id}`}>
+              <mesh position={[d.cx, y + 0.5, d.cz]} rotation-x={-Math.PI / 2}>
+                <circleGeometry args={[r, 36]} />
+                <meshBasicMaterial color="#6a9a3a" transparent opacity={0.18 + 0.22 * d.intensity} toneMapped={false} depthWrite={false} />
+              </mesh>
+              <mesh position={[d.cx, y + 0.55, d.cz]} rotation-x={-Math.PI / 2}>
+                <ringGeometry args={[r * 0.72, r * 0.92, 36]} />
+                <meshBasicMaterial color="#c8e050" transparent opacity={0.45 + 0.25 * d.intensity} toneMapped={false} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+              <mesh position={[d.cx, y + 0.4, d.cz]} rotation-x={-Math.PI / 2}>
+                <ringGeometry args={[4.2, 6.0, 28]} />
+                <meshBasicMaterial color="#a8d030" transparent opacity={0.7} toneMapped={false} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+            </group>
           );
         }
         return null;

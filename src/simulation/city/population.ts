@@ -6,7 +6,7 @@
  * park/obrzeża = mało. Wynik jest SIMULATED, ale przestrzennie spójny z danymi.
  */
 import type { SimBuilding } from '../../data/model';
-import type { PlayerBuilding } from './player';
+import type { AffectedBuildingRef, PlayerBuilding } from './player';
 
 /** m² powierzchni użytkowej na 1 mieszkańca (przybliżenie miejskie). */
 const M2_PER_PERSON = 38;
@@ -66,6 +66,34 @@ export function estimateAffectedResidents(opts: {
   }
 
   return Math.max(0, Math.round(sum));
+}
+
+/** Budynki w promieniu strefy – do zapisu skutków katastrofy. */
+export function listAffectedBuildings(opts: {
+  cx: number;
+  cz: number;
+  radius: number;
+  osmBuildings: SimBuilding[];
+  playerBuildings: PlayerBuilding[];
+  limit?: number;
+}): AffectedBuildingRef[] {
+  const { cx, cz, radius, osmBuildings, playerBuildings, limit = 48 } = opts;
+  const out: AffectedBuildingRef[] = [];
+  for (const b of playerBuildings) {
+    if (Math.hypot(b.x - cx, b.z - cz) <= radius) {
+      out.push({ id: b.id, kind: 'player' });
+      if (out.length >= limit) return out;
+    }
+  }
+  for (let i = 0; i < osmBuildings.length; i++) {
+    const b = osmBuildings[i]!;
+    const reach = Math.max(b.w, b.d) * 0.5;
+    if (Math.hypot(b.x - cx, b.z - cz) <= radius + reach) {
+      out.push({ id: i, kind: 'osm' });
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
 }
 
 /**

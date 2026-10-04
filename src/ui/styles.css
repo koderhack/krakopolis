@@ -825,6 +825,26 @@ code { background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; 
   background: rgba(47, 111, 179, 0.55);
   border-color: #4b8ede;
 }
+.ui-dock-volume {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 6px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ui-dock-volume input[type='range'] {
+  width: 100%;
+  accent-color: #4b8ede;
+  cursor: pointer;
+}
+.ui-dock-volume input[type='range']:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 .search input:focus { border-color: #4b8ede; }
 .search input::placeholder { color: #7d879a; }
 .search ul {
@@ -1198,6 +1218,75 @@ button.danger { border-color: #a33; background: rgba(200, 60, 50, 0.22); }
   background: rgba(255,255,255,0.06);
   font-size: 10px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ------------------------------------------------ traffic analysis */
+.panel.analysis.compact { max-width: 260px; }
+.panel.analysis .intensity-block h3 {
+  margin: 8px 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.panel.analysis .intensity-levels { display: flex; flex-direction: column; gap: 2px; }
+.panel.analysis .intensity-levels button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  margin: 0;
+  padding: 6px 8px;
+}
+.panel.analysis .intensity-levels button .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  flex: 0 0 auto; box-shadow: none;
+}
+.panel.analysis .intensity-levels button.on {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.22);
+}
+.panel.analysis .intensity-hint { margin-top: 8px; font-size: 11px; }
+
+.traffic-legend {
+  position: absolute;
+  left: 14px;
+  bottom: calc(var(--dock-h, 64px) + 18px);
+  z-index: 6;
+  min-width: 148px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(12, 16, 22, 0.82);
+  border: 1px solid rgba(255,255,255,0.12);
+  backdrop-filter: blur(8px);
+  color: #f2f4f7;
+  pointer-events: none;
+}
+.traffic-legend strong {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+  color: rgba(255,255,255,0.72);
+}
+.traffic-legend ul { list-style: none; margin: 0; padding: 0; }
+.traffic-legend li {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; margin: 4px 0;
+}
+.traffic-legend li i {
+  width: 12px; height: 12px; border-radius: 3px;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+}
+.panel.road-analysis dd {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.intensity-swatch {
+  width: 10px; height: 10px; border-radius: 50%;
+  display: inline-block; flex: 0 0 auto;
 }
 
 /* ------------------------------------------------ analysis / events */

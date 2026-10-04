@@ -14,7 +14,20 @@ import type { BuildId } from './catalog';
 
 export type RoadClosure = 'none' | 'closed' | 'cars-only' | 'destroyed';
 
-export type DisasterKind = 'fire' | 'flood' | 'blackout' | 'earthquake' | 'heat' | 'rain';
+export type DisasterKind =
+  | 'fire'
+  | 'flood'
+  | 'blackout'
+  | 'earthquake'
+  | 'heat'
+  | 'rain'
+  | 'airRaid'
+  | 'contamination';
+
+export interface AffectedBuildingRef {
+  id: number;
+  kind: 'osm' | 'player';
+}
 
 export interface PlayerBuilding {
   id: number;
@@ -57,6 +70,12 @@ export interface DisasterState {
   targetLabel?: string;
   /** Szacunek mieszkańców w zasięgu – z gęstości zabudowy okolicy. */
   affectedResidents?: number;
+  /** Promień strefy wpływu (metry lokalne) – zapisany przy starcie. */
+  radius?: number;
+  /** Budynki w strefie (OSM index lub id gracza). */
+  affectedBuildings?: AffectedBuildingRef[];
+  /** Skrót skutków / komunikatów dla historii i UI. */
+  consequences?: string[];
   /** Ostatni komunikat fazy (unikamy spamowania). */
   lastNotice?: string;
 }
@@ -127,6 +146,10 @@ export const DISASTERS = {
   earthquake: { label: 'Przeciążenie transportu', cost: 1_600_000, radius: 700, count: 9 },
   heat: { label: 'Fala upałów', cost: 550_000, radius: 900, count: 4 },
   rain: { label: 'Ekstremalne opady', cost: 1_100_000, radius: 550, count: 6 },
+  /** Alarm cywilny – skutki dla miasta/mieszkańców, bez fizyki ataku. */
+  airRaid: { label: 'Zagrożenie nalotem', cost: 1_200_000, radius: 450, count: 5 },
+  /** Kryzys urbanistyczny / odporność miasta – bez modelowania broni. */
+  contamination: { label: 'Ekstremalne skażenie', cost: 1_500_000, radius: 380, count: 6 },
 } as const;
 
 /** Efekty katastrof na metryki – jawnie odseparowane od danych. */
@@ -137,7 +160,14 @@ export const DISASTER_EFFECTS = {
   earthquake: { satisfaction: -18, pollution: +14, noise: +16, speed: 0.8 },
   heat: { satisfaction: -10, pollution: +8, noise: -2, speed: 0.88 },
   rain: { satisfaction: -9, pollution: +4, noise: +3, speed: 0.75 },
+  airRaid: { satisfaction: -16, pollution: +3, noise: +18, speed: 0.68 },
+  contamination: { satisfaction: -20, pollution: +26, noise: +8, speed: 0.62 },
 } as const;
+
+/** Katastrofy z fazami grow → peak → contain (jak pożar/powódź). */
+export const PHASED_DISASTERS = new Set<DisasterKind>([
+  'fire', 'flood', 'airRaid', 'contamination',
+]);
 
 /** Poziom wizualny katastrofy na podstawie intensywności. */
 export function disasterLevel(intensity: number): 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' {

@@ -20,7 +20,7 @@ export const LAYERS: LayerDef[] = [
   { id: 'pedestrians', label: 'Piesi', hint: 'Przechodnie na ulicach', defaultOn: true },
   { id: 'pedflow', label: 'Ruch pieszy', hint: 'Gdzie chodzi najwięcej ludzi', defaultOn: false },
   { id: 'labels', label: 'Nazwy miejsc', hint: 'Podpisy na mapie', defaultOn: false, observed: true },
-  { id: 'disasters', label: 'Katastrofy i zniszczenia', hint: 'Pożar, powódź, blackout, trzęsienie ziemi', defaultOn: true },
+  { id: 'disasters', label: 'Katastrofy i zniszczenia', hint: 'Pożar, powódź, nalot, skażenie i inne', defaultOn: true },
 ];
 
 export const defaultLayers = (): Set<string> => new Set(LAYERS.filter((l) => l.defaultOn).map((l) => l.id));

@@ -13,11 +13,11 @@ import { TrafficAssignment, mulberry32 } from './traffic/assignment';
 import { CAR, BUS, TRAM, PedestrianPool, makeRnd, type Park, type Ped, type Veh, type VehKind } from './pedestrians/agents';
 import type { CityData, SimRoute } from '../data/model';
 import {
-  DISASTERS, DISASTER_EFFECTS, PlayerHistory, disasterPenalty, pickRoads,
+  DISASTERS, DISASTER_EFFECTS, PHASED_DISASTERS, PlayerHistory, disasterPenalty, pickRoads,
   type DisasterKind, type DisasterState, type NewStop, type PlayerBuilding, type PlayerChange, type RoadClosure,
 } from './city/player';
 import { buildSpec, overlaps, type BuildId } from './city/catalog';
-import { estimateAffectedResidents, terrainRelativeHeight } from './city/population';
+import { estimateAffectedResidents, listAffectedBuildings, terrainRelativeHeight } from './city/population';
 import type { Origin } from '../data/types';
 import { BUDGET_INCOME_PER_SIM_SEC, COST_SCALE, START_BUDGET_PLN } from '../data/budget';
 
@@ -1525,13 +1525,27 @@ export class Sim {
         ? { buildingId: target.buildingId, buildingKind: target.buildingKind }
         : undefined,
     });
+    const affectedBuildings = listAffectedBuildings({
+      cx: sx, cz: sz,
+      radius,
+      osmBuildings: this.city?.buildings ?? [],
+      playerBuildings: this.playerBuildings,
+    });
+    const phased = PHASED_DISASTERS.has(kind);
+    const startNotice =
+      kind === 'fire' ? 'Wykryto pożar.'
+      : kind === 'flood' ? 'Wykryto zagrożenie powodziowe.'
+      : kind === 'airRaid' ? 'Wykryto zagrożenie nalotem — alarm cywilny.'
+      : kind === 'contamination' ? 'Wykryto ekstremalne skażenie — strefa kryzysowa.'
+      : `${def.label} — start.`;
+    const consequences: string[] = [startNotice];
     const d: DisasterState = {
       id: this.nextDisasterId++,
       kind,
       roads,
-      intensity: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
-      peak: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
-      phase: kind === 'fire' || kind === 'flood' ? 'grow' : 'peak',
+      intensity: phased ? 0.35 : 1,
+      peak: phased ? 0.35 : 1,
+      phase: phased ? 'grow' : 'peak',
       startedAt: Date.now(),
       label: def.label,
       cx: sx,
@@ -1540,7 +1554,10 @@ export class Sim {
       targetBuildingKind: target?.buildingKind,
       targetLabel,
       affectedResidents,
-      lastNotice: kind === 'fire' ? 'Wykryto pożar.' : kind === 'flood' ? 'Wykryto zagrożenie powodziowe.' : `${def.label} — start.`,
+      radius,
+      affectedBuildings,
+      consequences,
+      lastNotice: startNotice,
     };
     this.pushNotice(d.lastNotice!);
     const apply = () => {
@@ -1549,8 +1566,10 @@ export class Sim {
         const r = this.roads[id];
         if (!r) continue;
         if (kind === 'earthquake') { r.destroyed = true; r.closure = 'none'; }
-        else if (kind === 'fire') { r.closure = 'closed'; }
-        else if (kind === 'flood' || kind === 'rain') { r.closure = 'closed'; }
+        else if (kind === 'fire' || kind === 'flood' || kind === 'rain'
+          || kind === 'airRaid' || kind === 'contamination') {
+          r.closure = 'closed';
+        }
       }
       this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
       this.invalidateRouting();
@@ -1586,34 +1605,67 @@ export class Sim {
 
       if (d.kind === 'blackout') {
         if (age > 240) d.intensity = Math.max(0, d.intensity - dt * 0.25);
-      } else if (d.kind === 'fire' || d.kind === 'flood') {
+      } else if (PHASED_DISASTERS.has(d.kind)) {
         if (d.phase === 'grow') {
-          d.intensity = Math.min(1, d.intensity + dt * (d.kind === 'fire' ? 0.08 : 0.055));
+          const growRate =
+            d.kind === 'fire' ? 0.08
+            : d.kind === 'flood' ? 0.055
+            : d.kind === 'airRaid' ? 0.075
+            : 0.05; // contamination
+          d.intensity = Math.min(1, d.intensity + dt * growRate);
           d.peak = Math.max(d.peak, d.intensity);
           if (d.kind === 'fire' && d.intensity > 0.55 && d.lastNotice !== 'fire-spread') {
             this.spreadFire(d);
             d.lastNotice = 'fire-spread';
             this.pushNotice('Pożar rozprzestrzenia się na sąsiednie odcinki.');
+            this.pushConsequence(d, 'Pożar rozprzestrzenia się na sąsiednie odcinki.');
           }
           if (d.kind === 'flood' && d.intensity > 0.45 && d.lastNotice !== 'flood-rise') {
             d.lastNotice = 'flood-rise';
             this.pushNotice('Poziom wody wzrasta.');
+            this.pushConsequence(d, 'Poziom wody wzrasta.');
+          }
+          if (d.kind === 'airRaid' && d.intensity > 0.45 && d.lastNotice !== 'air-evac') {
+            d.lastNotice = 'air-evac';
+            this.pushNotice('Sygnał alarmowy — ewakuacja mieszkańców do bezpieczniejszych stref.');
+            this.pushConsequence(d, 'Ewakuacja mieszkańców do bezpieczniejszych stref.');
+          }
+          if (d.kind === 'contamination' && d.intensity > 0.4 && d.lastNotice !== 'contam-evac') {
+            d.lastNotice = 'contam-evac';
+            this.pushNotice('Strefa skażenia — ewakuacja i izolacja obszaru.');
+            this.pushConsequence(d, 'Ewakuacja i izolacja strefy skażenia.');
           }
           if (d.intensity >= 0.92 || age > 45) {
             d.phase = 'peak';
             if (d.kind === 'fire') {
               this.pushNotice('Straż została wysłana.');
               this.pushNotice('Rozpoczęto ewakuację.');
-              // część odcinków „spalona”
+              this.pushConsequence(d, 'Straż wysłana · ewakuacja · drogi zamknięte.');
               for (const id of d.roads.slice(0, Math.max(1, Math.ceil(d.roads.length * 0.4)))) {
                 const r = this.roads[id];
                 if (r) { r.destroyed = true; r.closure = 'none'; }
               }
               this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
               this.pushNotice('Droga została zamknięta.');
-            } else {
+            } else if (d.kind === 'flood') {
               this.pushNotice('Rozpoczęto ewakuację.');
               this.pushNotice('Droga została zamknięta.');
+              this.pushConsequence(d, 'Ewakuacja · drogi zamknięte.');
+            } else if (d.kind === 'airRaid') {
+              this.pushNotice('Służby cywilne reagują.');
+              this.pushNotice('Wybrane drogi zamknięte — ruch przekierowany.');
+              this.pushNotice('Transport publiczny w strefie wstrzymany / objazd.');
+              this.pushConsequence(d, 'Służby reagują · drogi zamknięte · transport wstrzymany/objazd.');
+            } else if (d.kind === 'contamination') {
+              this.pushNotice('Służby izolują strefę kryzysową.');
+              this.pushNotice('Drogi zamknięte — transport przekierowany.');
+              this.pushNotice('Infrastruktura w strefie oznaczona jako niedostępna.');
+              this.pushConsequence(d, 'Izolacja · drogi zamknięte · infrastruktura niedostępna.');
+              for (const id of d.roads.slice(0, Math.max(1, Math.ceil(d.roads.length * 0.5)))) {
+                const r = this.roads[id];
+                if (r) { r.destroyed = true; r.closure = 'none'; }
+              }
+              this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
             }
             this.invalidateRouting();
             this.reroute();
@@ -1621,7 +1673,13 @@ export class Sim {
         } else if (d.phase === 'peak') {
           if (age > 70) {
             d.phase = 'contain';
-            this.pushNotice(d.kind === 'fire' ? 'Pożar jest gaszony.' : 'Poziom wody stabilny.');
+            const msg =
+              d.kind === 'fire' ? 'Pożar jest gaszony.'
+              : d.kind === 'flood' ? 'Poziom wody stabilny.'
+              : d.kind === 'airRaid' ? 'Alarm odwołany — stopniowy powrót mieszkańców.'
+              : 'Strefa izolowana — służby zabezpieczają teren.';
+            this.pushNotice(msg);
+            this.pushConsequence(d, msg);
           }
         } else if (d.phase === 'contain') {
           d.intensity = Math.max(0, d.intensity - dt * 0.07);
@@ -1629,14 +1687,20 @@ export class Sim {
             for (const id of d.roads) {
               const r = this.roads[id];
               if (!r) continue;
-              if (r.destroyed && d.kind === 'fire') continue;
+              if (r.destroyed && (d.kind === 'fire' || d.kind === 'contamination')) continue;
               if (r.closure === 'closed') r.closure = 'none';
             }
             this.invalidateRouting();
           }
           if (d.intensity < 0.08) {
             d.phase = 'done';
-            this.pushNotice(d.kind === 'fire' ? 'Pożar opanowany.' : 'Poziom wody opadł.');
+            const done =
+              d.kind === 'fire' ? 'Pożar opanowany.'
+              : d.kind === 'flood' ? 'Poziom wody opadł.'
+              : d.kind === 'airRaid' ? 'Zagrożenie nalotem zakończone.'
+              : 'Sytuacja skażenia opanowana — strefa otwierana.';
+            this.pushNotice(done);
+            this.pushConsequence(d, done);
           }
         }
       } else {
@@ -1655,6 +1719,12 @@ export class Sim {
     const p = disasterPenalty(this.disasters);
     this.disasterSpeed = p.speed;
     this.disasterMood = p;
+  }
+
+  /** Dopisz skutek do historii zdarzenia (bez duplikatów). */
+  private pushConsequence(d: DisasterState, text: string) {
+    if (!d.consequences) d.consequences = [];
+    if (!d.consequences.includes(text)) d.consequences.push(text);
   }
 
   /** Dołącz 1–2 sąsiednie odcinki do pożaru – od epicentrum d.cx/d.cz. */

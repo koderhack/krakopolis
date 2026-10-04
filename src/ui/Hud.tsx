@@ -1,23 +1,60 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { COST, type Sim } from '../simulation/sim';
+import { COST, type Sim, type RoadSim } from '../simulation/sim';
 import type { CityData } from '../data/model';
 import type {
   FleetPose, Sel, Tool, TrafficView, PendingBuild, PendingDisaster, WorkspaceMode,
 } from '../scene/types';
 import { LAYERS } from '../scene/layers';
-import { ANALYSIS_LAYERS } from '../scene/analysis';
+import {
+  DEFAULT_TRAFFIC_INTENSITY,
+  TRAFFIC_INTENSITY_LEVELS,
+  sampleRoadTraffic,
+  type TrafficIntensityId,
+} from '../scene/analysis';
 import { DISASTERS, type DisasterKind } from '../simulation/city/player';
 import type { PipelineSnapshot } from '../data/pipeline';
 import type { Origin } from '../data/types';
 import { formatCoords } from '../data/adapters/cityAdapter';
 import { buildIndex, search, KIND_LABEL, type Place } from '../scene/search';
 import type { PlaceRef } from '../scene/types';
-import { BUILD_GROUPS, CATALOG, type BuildId } from '../simulation/city/catalog';
+import { BUILD_GROUPS, CATALOG, buildSpec, type BuildId } from '../simulation/city/catalog';
+import { osmBuildingResidents } from '../simulation/city/population';
 import type { ConsequenceReport } from '../simulation/consequences';
 import type { CityVersion, VersionCompare } from '../data/cityStore';
 import { compareVersions } from '../data/cityStore';
 import { formatBudgetPln, KRAKOW_BUDGET_2025 } from '../data/budget';
+import { useCityAudio, useCityAudioSettings } from '../audio/CityAudio';
 import { Minimap, type MiniCam } from './Minimap';
+import type { SimBuilding } from '../data/model';
+
+function ringAreaM2(ring: [number, number][]): number {
+  let a = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    a += ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+  }
+  return Math.abs(a) * 0.5;
+}
+
+function buildingFootprintM2(b: { w: number; d: number; ring?: [number, number][] }): number {
+  if (b.ring && b.ring.length >= 3) return Math.max(1, Math.round(ringAreaM2(b.ring)));
+  return Math.max(1, Math.round(b.w * b.d));
+}
+
+function osmBuildingTypeLabel(b: SimBuilding): string {
+  if (b.landmark) return 'obiekt charakterystyczny';
+  if (b.name?.trim()) return 'obiekt nazwany (OSM)';
+  const levels = Math.max(1, b.levels ?? Math.round(b.h / 3.3));
+  if (b.h >= 28 || levels >= 8) return 'wysoka zabudowa';
+  if (b.h >= 14 || levels >= 4) return 'zabudowa wielorodzinna';
+  if (b.h >= 8) return 'zabudowa niska / usługowa';
+  return 'zabudowa niska';
+}
+
+function osmTrafficEstimate(b: SimBuilding, residents: number): number {
+  const levels = Math.max(1, b.levels ?? Math.round(b.h / 3.3));
+  const area = buildingFootprintM2(b);
+  return Math.max(0, Math.round(residents * 0.14 + (area * levels) / 900));
+}
 
 interface Props {
   sim: Sim;
@@ -52,8 +89,8 @@ interface Props {
   fitCity: () => void;
   layers: Set<string>;
   toggleLayer: (id: string) => void;
-  analysis: Set<string>;
-  toggleAnalysis: (id: string) => void;
+  trafficIntensity: TrafficIntensityId;
+  setTrafficIntensity: (id: TrafficIntensityId) => void;
   disaster: DisasterKind;
   setDisaster: (d: DisasterKind) => void;
   roadFrom: { x: number; z: number } | null;
@@ -376,49 +413,93 @@ function CatalogPanel({
 }
 
 function AnalysisPanel({
-  analysis, toggleAnalysis, layers, toggleLayer,
+  intensity, setIntensity,
 }: {
-  analysis: Set<string>;
-  toggleAnalysis: (id: string) => void;
-  layers: Set<string>;
-  toggleLayer: (id: string) => void;
+  intensity: TrafficIntensityId;
+  setIntensity: (id: TrafficIntensityId) => void;
 }) {
+  const scaleHint = (() => {
+    const l = TRAFFIC_INTENSITY_LEVELS.find((x) => x.id === intensity);
+    if (!l || l.id === DEFAULT_TRAFFIC_INTENSITY) return 'bez skalowania';
+    return `×${l.scale}`;
+  })();
   return (
-    <>
-      <aside className="panel analysis">
-        <h2>Analiza <small>warstwy</small></h2>
-        <p className="sub">Zobacz, jak wygląda miasto pod różnymi kątami</p>
-        {ANALYSIS_LAYERS.map((l) => (
-          <button
-            key={l.id}
-            type="button"
-            className={analysis.has(l.id) ? 'on' : ''}
-            title={l.hint}
-            onClick={() => toggleAnalysis(l.id)}
-          >
-            <i className="dot" />
-            <span>{l.label}</span>
-            {l.estimate && <small>przybliżenie</small>}
-          </button>
+    <aside className="panel analysis compact">
+      <h2>Analiza</h2>
+      <p className="sub">Natężenie ruchu na sieci drogowej</p>
+      <div className="intensity-block">
+        <h3>Natężenie ruchu</h3>
+        <div className="intensity-levels" role="radiogroup" aria-label="Natężenie ruchu">
+          {TRAFFIC_INTENSITY_LEVELS.map((l) => (
+            <button key={l.id} type="button" role="radio" aria-checked={intensity === l.id}
+              className={intensity === l.id ? 'on' : ''} onClick={() => setIntensity(l.id)}>
+              <i className="dot" style={{ background: l.color }} />
+              <span>{l.label}</span>
+            </button>
+          ))}
+        </div>
+        <p className="note intensity-hint">Skala względem danych symulacji · {scaleHint}</p>
+      </div>
+    </aside>
+  );
+}
+
+function TrafficLegend() {
+  return (
+    <div className="traffic-legend" aria-label="Legenda natężenia ruchu">
+      <strong>NATĘŻENIE RUCHU</strong>
+      <ul>
+        {TRAFFIC_INTENSITY_LEVELS.map((l) => (
+          <li key={l.id}><i style={{ background: l.color }} /><span>{l.label}</span></li>
         ))}
-      </aside>
-      <aside className="panel analysis map-layers">
-        <h2>Mapa <small>warstwy</small></h2>
-        <p className="sub">Włącz lub wyłącz elementy widoku</p>
-        {LAYERS.map((l) => (
-          <button
-            key={l.id}
-            type="button"
-            className={layers.has(l.id) ? 'on' : ''}
-            title={l.hint}
-            onClick={() => toggleLayer(l.id)}
-          >
-            <i className={`dot ${l.observed ? 'obs' : ''}`} />
-            <span>{l.label}</span>
-          </button>
-        ))}
-      </aside>
-    </>
+      </ul>
+    </div>
+  );
+}
+
+function RoadAnalysisCard({
+  road, intensity, view, acts,
+}: {
+  road: RoadSim;
+  intensity: TrafficIntensityId;
+  view: TrafficView;
+  acts: { label: string; cost: number; run: () => void }[];
+}) {
+  const sample = sampleRoadTraffic(road, view, intensity);
+  const name = road.edge.name || formatCoords((road.edge.ax + road.edge.bx) / 2, (road.edge.az + road.edge.bz) / 2);
+  const pctVal = Math.round(Math.min(1, sample.display) * 100);
+  const vehPerH = road.capacity > 0 ? Math.round(sample.display * road.capacity * 4) : 0;
+  const speed = road.baselineSpeed != null
+    ? Math.round(road.baselineSpeed * (1 - 0.55 * Math.min(1, sample.display)))
+    : road.edge.speedLimit > 0
+      ? Math.round(road.edge.speedLimit * (1 - 0.7 * Math.min(1, sample.display)))
+      : 0;
+  const cap = road.capacity > 0 ? Math.round(road.capacity * 4) : 0;
+  return (
+    <aside className="panel road-analysis">
+      <h2>{name}</h2>
+      <p className="sub">{sample.level.label}</p>
+      <dl>
+        <dt>Wartość</dt>
+        <dd>
+          <span className="intensity-swatch" style={{ background: sample.level.color }} />
+          {pctVal}%
+          {sample.kind === 'fallback' && <small className="tag predicted">szacunek klasy</small>}
+        </dd>
+        {vehPerH > 0 && (<><dt>Pojazdy/h</dt><dd>~{vehPerH}</dd></>)}
+        {speed > 0 && (<><dt>Prędkość</dt><dd>~{speed} km/h</dd></>)}
+        {cap > 0 && (<><dt>Przepustowość</dt><dd>~{cap} poj./h</dd></>)}
+      </dl>
+      {acts.length > 0 && (
+        <div className="acts">
+          {acts.map((a) => (
+            <button key={a.label} type="button" onClick={a.run}>
+              {a.label}{a.cost ? <small> {formatBudgetPln(a.cost)}</small> : null}
+            </button>
+          ))}
+        </div>
+      )}
+    </aside>
   );
 }
 
@@ -700,7 +781,7 @@ function HelpSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
         <li><kbd>N</kbd> całe miasto</li>
         <li><kbd>1–3</kbd> Buduj / Analiza / Zdarzenia</li>
         <li>Najedź na <b>Krakopolis</b> — historia miasta</li>
-        <li>Widok (prawy dół): Szukaj · Metryki · Panele · Minimapa · Stopka · Tryby</li>
+        <li>Widok (prawy dół): Szukaj · Metryki · Panele · Minimapa · Stopka · Tryby · Dźwięk miasta</li>
       </ul>
     </div>
   );
@@ -713,7 +794,7 @@ export function Hud({
   pending, pendingDisaster, report, versions,
   onConfirmPending, onConfirmDisaster, onCancelPending, onDismissReport, onRestoreVersion,
   paused, speed, trafficView, msg, vehicle, goto, fitCity,
-  layers, toggleLayer, analysis, toggleAnalysis, disaster, setDisaster, roadFrom, setTool,
+  layers, toggleLayer, trafficIntensity, setTrafficIntensity, disaster, setDisaster, roadFrom, setTool,
   topDown, setTopDown, setPaused, setSpeed, setTrafficView, setVehicle, setSel, act,
   mapBounds, camSample, landmarks,
 }: Props) {
@@ -733,6 +814,10 @@ export function Hud({
   const histLeaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [clockOffsetUi, setClockOffsetUi] = useState(0);
   const [helpOpen, setHelpOpen] = useState(false);
+  const audioSettings = useCityAudioSettings();
+  const [soundOn, setSoundOn] = useState(audioSettings.initialEnabled);
+  const [soundVol, setSoundVol] = useState(audioSettings.initialVolume);
+  const { unlock: unlockAudio } = useCityAudio(sim, camSample, soundOn, soundVol);
 
   const sidesHidden = leftCollapsed && rightCollapsed;
   const toggleSides = () => {
@@ -773,6 +858,12 @@ export function Hud({
   const r = sel?.kind === 'road' ? sim.roads[sel.id] : null;
   const b = sel?.kind === 'building' ? city.buildings[sel.id] : null;
   const pb = sel?.kind === 'player' ? sim.playerBuildings.find((x) => x.id === sel.id) : null;
+  const osmResidents = b ? osmBuildingResidents(b) : 0;
+  const osmArea = b ? buildingFootprintM2(b) : 0;
+  const osmTraffic = b ? osmTrafficEstimate(b, osmResidents) : 0;
+  const pbSpec = pb ? buildSpec(pb.kind) : null;
+  const pbArea = pb ? buildingFootprintM2(pb) : 0;
+  const pbTraffic = pbSpec ? Math.round(pbSpec.trafficFactor * 100) : 0;
 
   const status = r ? (r.closed ? 'Zamknięta przez gracza' : r.pedestrian ? 'Strefa dla pieszych (gracz)' : 'Otwarta (stan z danych)') : '';
   const acts = r ? [
@@ -979,10 +1070,8 @@ export function Hud({
           )}
           {showAnalysis && (
             <AnalysisPanel
-              analysis={analysis}
-              toggleAnalysis={toggleAnalysis}
-              layers={layers}
-              toggleLayer={toggleLayer}
+              intensity={trafficIntensity}
+              setIntensity={setTrafficIntensity}
             />
           )}
           {showEvents && <EventsPanel disaster={disaster} setDisaster={setDisaster} />}
@@ -998,7 +1087,10 @@ export function Hud({
             />
           )}
           {vehicle && <VehicleCard vehicle={vehicle} city={city} setVehicle={setVehicle} />}
-          {r && !report && (
+          {r && !report && showAnalysis && (
+            <RoadAnalysisCard road={r} intensity={trafficIntensity} view={trafficView} acts={acts} />
+          )}
+          {r && !report && !showAnalysis && (
             <aside className="panel">
               <h2>{r.edge.name || formatCoords((r.edge.ax + r.edge.bx) / 2, (r.edge.az + r.edge.bz) / 2)}</h2>
               <p className="sub">{Math.round(r.edge.len)} m</p>
@@ -1016,31 +1108,41 @@ export function Hud({
             </aside>
           )}
           {b && !report && (
-            <aside className="panel">
-              <h2>{b.name ?? (b.landmark ? 'Obiekt charakterystyczny' : 'Budynek')}</h2>
-              <p className="sub">Zabudowa miasta</p>
+            <aside className="panel building-sel">
+              <h2>{b.name?.trim() || (b.landmark ? 'Obiekt charakterystyczny' : `Budynek #${sel!.id}`)}</h2>
+              <p className="sub">BUDYNEK · mapa miasta (OSM)</p>
               <dl>
-                <dt>Typ</dt><dd>zabudowa / obiekt miejski</dd>
-                <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m</dd>
-                <dt>Obrys</dt><dd>{b.w.toFixed(0)} × {b.d.toFixed(0)} m</dd>
+                <dt>ID</dt><dd>#{sel!.id}</dd>
+                <dt>Typ</dt><dd>{osmBuildingTypeLabel(b)}</dd>
+                <dt>Wysokość</dt><dd>{b.h.toFixed(1)} m{(b.levels ?? 0) > 0 ? ` · ~${b.levels} kond.` : ''}</dd>
+                <dt>Powierzchnia</dt><dd>{osmArea.toLocaleString('pl-PL')} m²</dd>
+                <dt>Mieszkańcy</dt><dd>~{osmResidents} (szacunek)</dd>
+                <dt>Ruch</dt><dd>~{osmTraffic} poj./cykl (szacunek)</dd>
+                <dt>Status</dt><dd>mapa miasta · nietykalny</dd>
               </dl>
-              <p className="note">Tego budynku nie można zburzyć — należy do mapy miasta. Zburz działa tylko dla budynków, które sam postawiłeś.</p>
+              <p className="note">Tego budynku nie można zburzyć — należy do mapy miasta. Dostępny dla Analizy i Zdarzeń (np. pożar).</p>
               <div className="acts">
                 <button type="button" onClick={() => goto(b.x, b.z, { kind: 'building', id: sel!.id })}>Wycentruj</button>
+                <button type="button" onClick={() => setSel(null)}>Odznacz</button>
               </div>
             </aside>
           )}
           {pb && !report && (
-            <aside className="panel">
+            <aside className="panel building-sel">
               <h2>{pb.name}</h2>
-              <p className="sub">Twój budynek</p>
+              <p className="sub">BUDYNEK · Twój obiekt</p>
               <dl>
-                <dt>Typ</dt><dd>{pb.kind}</dd>
-                <dt>Mieszkańcy</dt><dd>{pb.residents}</dd>
-                <dt>Praca</dt><dd>{pb.jobs}</dd>
+                <dt>ID</dt><dd>#{pb.id}</dd>
+                <dt>Typ</dt><dd>{pbSpec?.label ?? pb.kind}</dd>
+                <dt>Wysokość</dt><dd>{pb.h.toFixed(1)} m</dd>
+                <dt>Powierzchnia</dt><dd>{pbArea.toLocaleString('pl-PL')} m²</dd>
+                <dt>Mieszkańcy</dt><dd>{pb.residents}{pb.jobs ? ` · praca ${pb.jobs}` : ''}</dd>
+                <dt>Ruch</dt><dd>~{pbTraffic} (wzgl. katalogu)</dd>
+                <dt>Status</dt><dd>postawiony · edytowalny</dd>
               </dl>
               <div className="acts">
-                <button type="button" onClick={() => goto(pb.x, pb.z)}>Wycentruj</button>
+                <button type="button" onClick={() => goto(pb.x, pb.z, { kind: 'player', id: pb.id })}>Wycentruj</button>
+                <button type="button" onClick={() => setSel(null)}>Odznacz</button>
                 <button type="button" className="danger" title="Delete ×2" onClick={() => {
                   act(() => sim.removePlayerBuilding(pb.id), `Zburzono: ${pb.name}.`);
                   setSel(null);
@@ -1053,23 +1155,7 @@ export function Hud({
         </div>
       </div>
 
-      {mode === 'analyze' && (
-        <nav className="tools">
-          {(['simulated', 'baseline', 'predicted'] as TrafficView[]).map((v) => (
-            <button key={v} type="button" className={trafficView === v ? 'on' : ''} onClick={() => setTrafficView(v)}>
-              {v === 'simulated' ? 'Kolor: gra' : v === 'baseline' ? 'Kolor: teraz' : 'Kolor: prognoza'}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={layers.has('labels') ? 'on' : ''}
-            title="Etykiety miejsc, przystanków i ulic"
-            onClick={() => toggleLayer('labels')}
-          >
-            Napisy
-          </button>
-        </nav>
-      )}
+      {showAnalysis && <TrafficLegend />}
 
       <div className="hint">
         {pending ? 'Podgląd budowy – Enter zatwierdza · Backspace / Esc anuluje.'
@@ -1079,7 +1165,7 @@ export function Hud({
                 : tool === 'stop-bus' || tool === 'stop-tram' ? 'Kliknij miejsce przystanku na mapie.'
                   : 'Wybierz obiekt z katalogu po prawej.')
               : mode === 'events' ? `WYBIERZ MIEJSCE · ${DISASTERS[disaster].label} — kliknij budynek lub teren · Esc anuluje.`
-                : mode === 'analyze' ? 'Warstwy modelu i mapy w panelu po prawej.'
+                : mode === 'analyze' ? 'Wybierz natężenie — mapa koloruje drogi. Kliknij ulicę, by zobaczyć parametry.'
                     : 'LPM = pan · PPM = obrót · ? = sterowanie · Krakopolis = historia.'}
       </div>
       {toast && <div className="toast">{toast}</div>}
@@ -1121,6 +1207,35 @@ export function Hud({
             <button type="button" className={showMinimap ? 'on' : ''} onClick={() => setShowMinimap((v) => !v)}>Minimapa</button>
             <button type="button" className={showFoot ? 'on' : ''} onClick={() => setShowFoot((v) => !v)}>Stopka</button>
             <button type="button" className={showModeBar ? 'on' : ''} onClick={() => setShowModeBar((v) => !v)}>Tryby</button>
+            <button
+              type="button"
+              className={soundOn ? 'on' : ''}
+              title="Dźwięk miasta (ambient, ruch, katastrofy)"
+              onClick={() => {
+                const next = !soundOn;
+                setSoundOn(next);
+                audioSettings.persistEnabled(next);
+                if (next) void unlockAudio();
+              }}
+            >
+              Dźwięk {soundOn ? 'ON' : 'OFF'}
+            </button>
+            <label className="ui-dock-volume" title="Głośność dźwięku miasta">
+              Głośność
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(soundVol * 100)}
+                disabled={!soundOn}
+                onChange={(e) => {
+                  const v = Number(e.target.value) / 100;
+                  setSoundVol(v);
+                  audioSettings.persistVolume(v);
+                  if (soundOn) void unlockAudio();
+                }}
+              />
+            </label>
           </div>
         ) : (
           <button
