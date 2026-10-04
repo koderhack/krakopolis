@@ -188,7 +188,7 @@ export function metricsSnapshot(sim: Sim) {
   };
 }
 
-/** Raport przed uruchomieniem scenariusza katastrofy (szacunek). */
+/** Raport po uruchomieniu katastrofy w konkretnym miejscu. */
 export function previewDisasterReport(p: {
   label: string;
   cost: number;
@@ -196,25 +196,41 @@ export function previewDisasterReport(p: {
   radius: number;
   estimatedAffected: number;
   effects: { satisfaction: number; pollution: number; noise: number; speed: number };
+  locationLabel?: string;
+  buildingLabel?: string;
+  started?: boolean;
 }): ConsequenceReport {
+  const where = p.buildingLabel
+    ? `Budynek: ${p.buildingLabel}`
+    : p.locationLabel
+      ? `Lokalizacja: ${p.locationLabel}`
+      : null;
   return {
-    title: `Scenariusz: ${p.label}`,
-    summary: `Promień ~${Math.round(p.radius)} m · ${p.roads} ulic zagrożonych · ok. ${p.estimatedAffected} osób · koszt ${formatBudgetPln(p.cost)}.`,
+    title: p.started ? `${p.label.toUpperCase()} ROZPOCZĘTY` : `Scenariusz: ${p.label}`,
+    summary: [
+      where,
+      `Promień ~${Math.round(p.radius)} m · ${p.roads} ulic · ok. ${p.estimatedAffected} osób · ${formatBudgetPln(p.cost)}.`,
+    ].filter(Boolean).join(' · '),
     observations: [
+      ...(p.buildingLabel ? [{
+        text: `Źródło przy budynku: ${p.buildingLabel}.`,
+        kind: 'warn' as const,
+        confidence: 'wysoka' as const,
+      }] : []),
+      ...(p.locationLabel ? [{
+        text: `Lokalizacja źródła: ${p.locationLabel}.`,
+        kind: 'info' as const,
+        confidence: 'wysoka' as const,
+      }] : []),
       {
-        text: `Potencjalnie dotkniętych ok. ${p.estimatedAffected} mieszkańców.`,
+        text: `Dotkniętych ok. ${p.estimatedAffected} mieszkańców w zasięgu.`,
         kind: 'warn',
         confidence: 'niska',
       },
       {
-        text: `Zadowolenie ok. ${p.effects.satisfaction} pkt, smog ${p.effects.pollution >= 0 ? '+' : ''}${p.effects.pollution}, prędkość ruchu ×${p.effects.speed.toFixed(2)}.`,
+        text: `Zadowolenie ok. ${p.effects.satisfaction} pkt, smog ${p.effects.pollution >= 0 ? '+' : ''}${p.effects.pollution}, prędkość ×${p.effects.speed.toFixed(2)}.`,
         kind: 'info',
         confidence: 'średnia',
-      },
-      {
-        text: 'Enter uruchamia scenariusz. Esc anuluje podgląd.',
-        kind: 'info',
-        confidence: 'wysoka',
       },
     ],
     impacts: [
@@ -225,7 +241,7 @@ export function previewDisasterReport(p: {
       { label: 'Koszt', level: levelFromAbs(p.cost, 600_000, 1_200_000), delta: formatBudgetPln(p.cost) },
     ],
     horizons: [
-      { label: 'TERAZ', note: 'Scenariusz jeszcze nie uruchomiony – zatwierdź, by zacząć.' },
+      { label: 'TERAZ', note: p.started ? 'Zdarzenie aktywne – służby reagują.' : 'Kliknij mapę, by rozpocząć.' },
       { label: '1 ROK', note: 'Odbudowa zależy od Twoich kolejnych decyzji.' },
       { label: '5 LAT', note: 'Za daleko w przyszłość – pomijamy.' },
       { label: '10 LAT', note: 'Za daleko w przyszłość – pomijamy.' },

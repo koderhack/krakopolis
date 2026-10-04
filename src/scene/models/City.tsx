@@ -287,7 +287,7 @@ export function roadWidth(r: RoadSim): number {
 }
 
 export const RoadNetwork = memo(function RoadNetwork({
-  sim, ver, sel, view, layers, onSelect,
+  sim, ver, sel, view, layers, onSelect, onDisasterPick,
 }: {
   sim: Sim;
   ver: number;
@@ -295,6 +295,8 @@ export const RoadNetwork = memo(function RoadNetwork({
   view: TrafficView;
   layers: Set<string>;
   onSelect: (id: number) => void;
+  /** Gdy ustawione – klik w drogę przekazuje dokładny punkt (katastrofa). */
+  onDisasterPick?: (x: number, z: number) => void;
 }) {
   const roads = sim.roads;
   const deck = useRef<THREE.InstancedMesh>(null);
@@ -441,7 +443,12 @@ export const RoadNetwork = memo(function RoadNetwork({
         receiveShadow
         onClick={(e: ThreeEvent<MouseEvent>) => {
           e.stopPropagation();
-          if (e.delta > 4 || e.instanceId == null) return;
+          if (e.delta > 4) return;
+          if (onDisasterPick) {
+            onDisasterPick(e.point.x, e.point.z);
+            return;
+          }
+          if (e.instanceId == null) return;
           onSelect(e.instanceId);
         }}
       />
@@ -957,46 +964,90 @@ export function PlayerStructures({
 export function DisasterLayer({ sim, ver }: { sim: Sim; ver: number }) {
   return (
     <group key={ver}>
-      {sim.disasters.map((d, i) =>
+      {/* ŹRÓDŁO = dokładny punkt kliknięcia (cx, cz) */}
+      {sim.disasters.map((d) => {
+        const y = groundY(d.cx, d.cz);
+        if (d.kind === 'fire') {
+          return (
+            <group key={`src-fire-${d.id}`}>
+              <FireFx x={d.cx} y={y} z={d.cz} intensity={d.intensity} />
+              <mesh position={[d.cx, y + 0.35, d.cz]} rotation-x={-Math.PI / 2}>
+                <ringGeometry args={[4.5, 6.2, 28]} />
+                <meshBasicMaterial color="#ff5a20" transparent opacity={0.75} toneMapped={false} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+            </group>
+          );
+        }
+        if (d.kind === 'flood' || d.kind === 'rain') {
+          const waterH = 0.5 + 3.2 * d.intensity;
+          const r = 18 + 40 * d.intensity;
+          return (
+            <group key={`src-flood-${d.id}`}>
+              <mesh position={[d.cx, y + waterH * 0.4, d.cz]}>
+                <cylinderGeometry args={[r, r * 1.05, waterH, 28]} />
+                <meshStandardMaterial
+                  color={d.kind === 'rain' ? '#3a7a9a' : '#2a6a8e'}
+                  transparent
+                  opacity={0.4 + 0.35 * d.intensity}
+                  roughness={0.12}
+                  metalness={0.4}
+                  depthWrite={false}
+                />
+              </mesh>
+              <mesh position={[d.cx, y + 0.3, d.cz]} rotation-x={-Math.PI / 2}>
+                <ringGeometry args={[5, 7, 28]} />
+                <meshBasicMaterial color="#5cc8ff" transparent opacity={0.7} toneMapped={false} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+            </group>
+          );
+        }
+        if (d.kind === 'earthquake') {
+          return (
+            <mesh key={`src-eq-${d.id}`} position={[d.cx, y + 4 * d.intensity, d.cz]}>
+              <coneGeometry args={[5 * d.intensity, 12 * d.intensity, 6]} />
+              <meshBasicMaterial color="#ff7a1a" transparent opacity={0.75} toneMapped={false} />
+            </mesh>
+          );
+        }
+        if (d.kind === 'heat' || d.kind === 'blackout') {
+          return (
+            <mesh key={`src-h-${d.id}`} position={[d.cx, y + 0.5, d.cz]} rotation-x={-Math.PI / 2}>
+              <circleGeometry args={[22 + 30 * d.intensity, 32]} />
+              <meshBasicMaterial
+                color={d.kind === 'heat' ? '#e08040' : '#606878'}
+                transparent
+                opacity={0.28 * d.intensity}
+                toneMapped={false}
+                depthWrite={false}
+              />
+            </mesh>
+          );
+        }
+        return null;
+      })}
+      {/* Skutki uboczne na drogach – słabsze, wokół źródła */}
+      {sim.disasters.map((d) =>
         d.roads.map((rid) => {
           const e = sim.roads[rid]?.edge;
           if (!e) return null;
           const x = (e.ax + e.bx) / 2, z = (e.az + e.bz) / 2;
           const y = groundY(x, z);
           if (d.kind === 'fire') {
-            return <FireFx key={`f${i}-${rid}`} x={x} y={y} z={z} intensity={d.intensity} />;
-          }
-          if (d.kind === 'earthquake') {
-            return (
-              <group key={`f${i}-${rid}`}>
-                <mesh position={[x, y + 4 * d.intensity, z]}>
-                  <coneGeometry args={[4 * d.intensity, 10 * d.intensity, 6]} />
-                  <meshBasicMaterial color="#ff7a1a" transparent opacity={0.7} toneMapped={false} />
-                </mesh>
-              </group>
-            );
+            return <FireFx key={`f${d.id}-${rid}`} x={x} y={y} z={z} intensity={d.intensity * 0.55} />;
           }
           if (d.kind === 'flood' || d.kind === 'rain') {
-            const waterH = 0.4 + 2.8 * d.intensity;
+            const waterH = 0.35 + 2.2 * d.intensity;
             return (
-              <mesh key={`w${i}-${rid}`} position={[x, y + waterH * 0.45, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
-                <boxGeometry args={[e.len * 0.98, waterH, 11 + 4 * d.intensity]} />
+              <mesh key={`w${d.id}-${rid}`} position={[x, y + waterH * 0.45, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
+                <boxGeometry args={[e.len * 0.98, waterH, 10 + 3 * d.intensity]} />
                 <meshStandardMaterial
                   color={d.kind === 'rain' ? '#3a7a9a' : '#2a6a8e'}
                   transparent
-                  opacity={0.35 + 0.4 * d.intensity}
+                  opacity={0.3 + 0.3 * d.intensity}
                   roughness={0.15}
                   metalness={0.35}
                   depthWrite={false}
                 />
-              </mesh>
-            );
-          }
-          if (d.kind === 'heat' || d.kind === 'blackout') {
-            return (
-              <mesh key={`h${i}-${rid}`} position={[x, y + 0.4, z]} rotation-y={Math.atan2(-e.hz, e.hx)}>
-                <boxGeometry args={[e.len, 0.3, 10]} />
-                <meshBasicMaterial color={d.kind === 'heat' ? '#e08040' : '#606878'} transparent opacity={0.35 * d.intensity} toneMapped={false} />
               </mesh>
             );
           }

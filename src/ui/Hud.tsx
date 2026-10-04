@@ -431,7 +431,11 @@ function EventsPanel({
   return (
     <aside className="panel events">
       <h2>Zdarzenia <small>scenariusze</small></h2>
-      <p className="sub">Wybierz → kliknij mapę → Enter uruchamia · Esc anuluje</p>
+      <div className="aim-banner">
+        <b>WYBIERZ MIEJSCE</b>
+        <span>Kliknij na mapie, aby rozpocząć: {DISASTERS[disaster].label}.</span>
+        <small>Esc / Backspace anuluje · bez tworzenia zdarzenia</small>
+      </div>
       <div className="event-list">
         {(Object.keys(DISASTERS) as DisasterKind[]).map((k) => (
           <button
@@ -1074,7 +1078,7 @@ export function Hud({
               : tool === 'road' || tool === 'tram-track' ? 'Kliknij początek, potem koniec odcinka.'
                 : tool === 'stop-bus' || tool === 'stop-tram' ? 'Kliknij miejsce przystanku na mapie.'
                   : 'Wybierz obiekt z katalogu po prawej.')
-              : mode === 'events' ? `Kliknij miejsce: ${DISASTERS[disaster].label}.`
+              : mode === 'events' ? `WYBIERZ MIEJSCE · ${DISASTERS[disaster].label} — kliknij budynek lub teren · Esc anuluje.`
                 : mode === 'analyze' ? 'Warstwy modelu i mapy w panelu po prawej.'
                     : 'LPM = pan · PPM = obrót · ? = sterowanie · Krakopolis = historia.'}
       </div>

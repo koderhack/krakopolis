@@ -45,6 +45,9 @@ export interface PendingDisaster {
   cost: number;
   label: string;
   report: import('../simulation/consequences').ConsequenceReport;
+  targetBuildingId?: number;
+  targetBuildingKind?: 'osm' | 'player';
+  targetLabel?: string;
 }
 
 export interface PlaceRef { kind: 'road' | 'building'; id: number }

@@ -34,8 +34,10 @@ export interface PlayerBuilding {
 }
 
 export interface DisasterState {
+  /** Unikalny id w sesji. */
+  id: number;
   kind: DisasterKind;
-  /** Odcinki objęte skutkiem (zamknięte lub zniszczone). */
+  /** Odcinki objęte skutkiem (zamknięte lub zniszczone) – efekty uboczne, NIE źródło. */
   roads: number[];
   /** Bieżąca intensywność 0..1 – rośnie, potem maleje. */
   intensity: number;
@@ -46,9 +48,15 @@ export interface DisasterState {
   phase: 'grow' | 'peak' | 'contain' | 'done';
   /** Opis skutków pokazywany w UI. */
   label: string;
-  /** Epicentrum (do podglądu / minimapy). */
-  cx?: number;
-  cz?: number;
+  /** Epicentrum = dokładny punkt kliknięcia (metry lokalne). */
+  cx: number;
+  cz: number;
+  /** Budynek docelowy (OSM index lub id gracza). */
+  targetBuildingId?: number;
+  targetBuildingKind?: 'osm' | 'player';
+  targetLabel?: string;
+  /** Szacunek mieszkańców w zasięgu – z gęstości zabudowy okolicy. */
+  affectedResidents?: number;
   /** Ostatni komunikat fazy (unikamy spamowania). */
   lastNotice?: string;
 }
@@ -153,22 +161,23 @@ export function disasterPenalty(active: DisasterState[]): { speed: number; satis
   return { speed, satisfaction, pollution, noise };
 }
 
-/** Losowy wybór odcinka w promieniu – używane przez katastrofy. */
-export function pickRoads<T>(roads: T[], cx: number, cz: number, radius: number, count: number, filter: (r: T) => boolean, rand: () => number = rnd): T[] {
-  const near = roads.filter((r) => {
-    if (!filter(r)) return false;
-    const mx = (r as unknown as { edge: { ax: number; az: number } }).edge.ax;
-    const mz = (r as unknown as { edge: { az: number } }).edge.az;
-    return Math.hypot(mx - cx, mz - cz) <= radius;
-  });
-  if (near.length <= count) return near;
-  const out: T[] = [];
-  const used = new Set<number>();
-  for (let i = 0; i < count; i++) {
-    const k = Math.floor(rand() * near.length);
-    if (used.has(k)) continue;
-    used.add(k);
-    out.push(near[k]);
-  }
-  return out;
+/** Najbliższe odcinki wokół punktu – odległość do środka odcinka (nie losowa). */
+export function pickRoads<T extends { edge: { ax: number; az: number; bx: number; bz: number } }>(
+  roads: T[],
+  cx: number,
+  cz: number,
+  radius: number,
+  count: number,
+  filter: (r: T) => boolean,
+): T[] {
+  const scored = roads
+    .filter(filter)
+    .map((r) => {
+      const mx = (r.edge.ax + r.edge.bx) * 0.5;
+      const mz = (r.edge.az + r.edge.bz) * 0.5;
+      return { r, dist: Math.hypot(mx - cx, mz - cz) };
+    })
+    .filter((x) => x.dist <= radius)
+    .sort((a, b) => a.dist - b.dist);
+  return scored.slice(0, Math.max(0, count)).map((x) => x.r);
 }

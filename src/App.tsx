@@ -3,6 +3,7 @@ import { Sim as SimEngine } from './simulation/sim';
 import { pipeline, type PipelineSnapshot } from './data/pipeline';
 import type { CityData } from './data/model';
 import { toLatLon } from './data/geo';
+import { formatCoords } from './data/adapters/cityAdapter';
 import { CityScene } from './scene/CityScene';
 import { defaultLayers } from './scene/layers';
 import type {
@@ -10,6 +11,7 @@ import type {
   Sel, Tool, TrafficView, WorkspaceMode,
 } from './scene/types';
 import type { DisasterKind } from './simulation/city/player';
+import { DISASTERS } from './simulation/city/player';
 import { Hud } from './ui/Hud';
 import { buildSpec, type BuildId } from './simulation/city/catalog';
 import {
@@ -68,6 +70,21 @@ function toStoreSnapshot(sim: SimEngine): PlayerSnapshot {
     })),
     parks: s.parks.map((p) => ({ x: p.x, z: p.z, r: p.r, shape: p.shape, w: p.d ? p.r * 2 : undefined, d: p.d ? p.d * 2 : undefined })),
     budget: s.budget,
+    disasters: s.disasters.map((d) => ({
+      id: d.id,
+      kind: d.kind,
+      cx: d.cx,
+      cz: d.cz,
+      intensity: d.intensity,
+      peak: d.peak,
+      phase: d.phase,
+      startedAt: d.startedAt,
+      roads: [...d.roads],
+      label: d.label,
+      targetBuildingId: d.targetBuildingId,
+      targetBuildingKind: d.targetBuildingKind,
+      targetLabel: d.targetLabel,
+    })),
   };
 }
 
@@ -111,6 +128,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   const [topDown, setTopDown] = useState(false);
   const [pending, setPending] = useState<PendingBuild | null>(null);
   const [pendingDisaster, setPendingDisaster] = useState<PendingDisaster | null>(null);
+  const [focusTip, setFocusTip] = useState<{ x: number; z: number; label: string } | null>(null);
   const [report, setReport] = useState<ConsequenceReport | null>(null);
   const [versions, setVersions] = useState<CityVersion[]>([]);
   const [ready, setReady] = useState(false);
@@ -128,7 +146,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     (async () => {
       const latest = await ensureRootVersion();
       if (!alive) return;
-      if (latest.snapshot && (latest.snapshot.buildings.length || latest.snapshot.parks.length)) {
+      if (latest.snapshot && (latest.snapshot.buildings.length || latest.snapshot.parks.length || latest.snapshot.disasters?.length)) {
         sim.applyPlayerSnapshot({
           buildings: latest.snapshot.buildings.map((b, i) => ({ ...b, id: i })),
           parks: latest.snapshot.parks.map((p) => ({
@@ -137,6 +155,21 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
             d: p.d ? p.d / 2 : p.d,
           })),
           budget: latest.snapshot.budget,
+          disasters: (latest.snapshot.disasters ?? []).map((d) => ({
+            id: d.id,
+            kind: d.kind as DisasterKind,
+            cx: d.cx,
+            cz: d.cz,
+            intensity: d.intensity,
+            peak: d.peak,
+            phase: d.phase as 'grow' | 'peak' | 'contain' | 'done',
+            startedAt: d.startedAt,
+            roads: d.roads,
+            label: d.label,
+            targetBuildingId: d.targetBuildingId,
+            targetBuildingKind: d.targetBuildingKind,
+            targetLabel: d.targetLabel,
+          })),
         });
         setVer((v) => v + 1);
       }
@@ -221,16 +254,94 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   const confirmDisaster = useCallback(async () => {
     if (!pendingDisaster || !ready) return;
     const before = metricsSnapshot(sim);
-    const err = act(() => sim.triggerDisaster(pendingDisaster.kind, pendingDisaster.x, pendingDisaster.z), 'Scenariusz uruchomiony.');
+    const target = pendingDisaster.targetBuildingId != null
+      ? {
+          buildingId: pendingDisaster.targetBuildingId,
+          buildingKind: pendingDisaster.targetBuildingKind,
+          label: pendingDisaster.targetLabel,
+        }
+      : undefined;
+    const err = act(
+      () => sim.triggerDisaster(pendingDisaster.kind, pendingDisaster.x, pendingDisaster.z, target),
+      `${pendingDisaster.label} rozpoczęty.`,
+    );
     if (!err) {
       const after = reportAfterApply(pendingDisaster.label, before, metricsSnapshot(sim));
-      setReport(after);
+      const loc = formatCoords(pendingDisaster.x, pendingDisaster.z);
+      setReport({
+        ...after,
+        title: `${pendingDisaster.label.toUpperCase()} ROZPOCZĘTY`,
+        summary: [
+          pendingDisaster.targetLabel ? `Budynek: ${pendingDisaster.targetLabel}` : null,
+          `Lokalizacja: ${loc}`,
+          after.summary,
+        ].filter(Boolean).join(' · '),
+        observations: [
+          ...(pendingDisaster.targetLabel
+            ? [{ text: `Źródło przy: ${pendingDisaster.targetLabel}.`, kind: 'warn' as const, confidence: 'wysoka' as const }]
+            : []),
+          { text: `Lokalizacja źródła: ${loc}.`, kind: 'info' as const, confidence: 'wysoka' as const },
+          ...after.observations,
+        ],
+      });
+      setFocusTip({ x: pendingDisaster.x, z: pendingDisaster.z, label: pendingDisaster.label });
       setPendingDisaster(null);
-      setTool('select');
-      setMode(null);
+      setTool('disaster');
+      setMode('events');
       await persistAction(`Scenariusz: ${pendingDisaster.label}`, 'disaster', after);
     }
   }, [pendingDisaster, ready, sim, act, persistAction]);
+
+  /**
+   * Kliknięcie w trybie zdarzeń → natychmiastowa katastrofa w DOKŁADNYM punkcie.
+   * Budynek: cx/cz = środek budynku. Teren: cx/cz = punkt kliknięcia.
+   */
+  const disasterBusy = useRef(false);
+  const beginDisasterAt = useCallback(async (
+    x: number,
+    z: number,
+    target?: { buildingId: number; buildingKind: 'osm' | 'player'; label: string },
+  ) => {
+    if (!ready || tool !== 'disaster' || disasterBusy.current) return;
+    disasterBusy.current = true;
+    try {
+      let sx = x, sz = z;
+      if (target?.buildingKind === 'player') {
+        const b = sim.playerBuildings.find((p) => p.id === target.buildingId);
+        if (b) { sx = b.x; sz = b.z; }
+      } else if (target?.buildingKind === 'osm') {
+        const b = city.buildings[target.buildingId];
+        if (b) { sx = b.x; sz = b.z; }
+      }
+      const prev = sim.previewDisaster(disaster, sx, sz, target);
+      const before = metricsSnapshot(sim);
+      const err = act(
+        () => sim.triggerDisaster(disaster, sx, sz, target),
+        `${prev.label} rozpoczęty.`,
+      );
+      if (err) return;
+      const after = reportAfterApply(prev.label, before, metricsSnapshot(sim));
+      const loc = formatCoords(sx, sz);
+      setReport(previewDisasterReport({
+        label: prev.label,
+        cost: prev.cost,
+        roads: prev.roads.length,
+        radius: prev.radius,
+        estimatedAffected: prev.estimatedAffected,
+        effects: prev.effects,
+        locationLabel: loc,
+        buildingLabel: target?.label,
+        started: true,
+      }));
+      setFocusTip({ x: sx, z: sz, label: prev.label });
+      setPendingDisaster(null);
+      setTool('disaster');
+      setMode('events');
+      await persistAction(`Scenariusz: ${prev.label}`, 'disaster', after);
+    } finally {
+      window.setTimeout(() => { disasterBusy.current = false; }, 250);
+    }
+  }, [ready, tool, disaster, sim, city.buildings, act, persistAction]);
 
   const cancelPending = useCallback(() => {
     setPending(null);
@@ -394,30 +505,41 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
       return;
     }
     if (tool === 'disaster') {
-      const prev = sim.previewDisaster(disaster, x, z);
-      const rep = previewDisasterReport({
-        label: prev.label,
-        cost: prev.cost,
-        roads: prev.roads.length,
-        radius: prev.radius,
-        estimatedAffected: prev.estimatedAffected,
-        effects: prev.effects,
-      });
-      setPendingDisaster({
-        kind: disaster, x, z,
-        roads: prev.roads,
-        radius: prev.radius,
-        estimatedAffected: prev.estimatedAffected,
-        cost: prev.cost,
-        label: prev.label,
-        report: rep,
-      });
-      setReport(rep);
-      setMsg((m) => ({ id: m.id + 1, text: `Podgląd: ${prev.label} — uruchom lub anuluj.` }));
+      void beginDisasterAt(x, z);
+      return;
     }
   };
 
   const onGround = (x: number, z: number) => commitPlace(x, z, x, z);
+
+  const onMapSelect = useCallback((s: Sel) => {
+    if (tool === 'disaster' && s) {
+      if (s.kind === 'building') {
+        const b = city.buildings[s.id];
+        if (b) {
+          const label = b.name?.trim() || `Budynek #${s.id}`;
+          void beginDisasterAt(b.x, b.z, { buildingId: s.id, buildingKind: 'osm', label });
+          setSel(s);
+          return;
+        }
+      }
+      if (s.kind === 'player') {
+        const b = sim.playerBuildings.find((p) => p.id === s.id);
+        if (b) {
+          const label = b.name?.trim() || `Budynek gracza #${s.id}`;
+          void beginDisasterAt(b.x, b.z, { buildingId: s.id, buildingKind: 'player', label });
+          setSel(s);
+          return;
+        }
+      }
+      if (s.kind === 'road') {
+        // W trybie zdarzeń klik w drogę obsługuje onGround z dokładnym e.point.
+        return;
+      }
+    }
+    setSel(s);
+    if (s) { setVehicle(null); setNeoSelected(false); }
+  }, [tool, city.buildings, sim, beginDisasterAt]);
 
   const toggleLayer = (id: string) => setLayers((prev) => {
     const next = new Set(prev);
@@ -434,6 +556,21 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         x: p.x, z: p.z, r: p.r, shape: p.shape, d: p.d ? p.d / 2 : undefined,
       })),
       budget: snap.budget,
+      disasters: (snap.disasters ?? []).map((d) => ({
+        id: d.id,
+        kind: d.kind as DisasterKind,
+        cx: d.cx,
+        cz: d.cz,
+        intensity: d.intensity,
+        peak: d.peak,
+        phase: d.phase as 'grow' | 'peak' | 'contain' | 'done',
+        startedAt: d.startedAt,
+        roads: d.roads,
+        label: d.label,
+        targetBuildingId: d.targetBuildingId,
+        targetBuildingKind: d.targetBuildingKind,
+        targetLabel: d.targetLabel,
+      })),
     });
     setVer((x) => x + 1);
     setReport({
@@ -470,11 +607,19 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         }
       }
 
-      // BACKSPACE — tylko anuluj preview (NIGDY nie usuwa budynku)
+      // BACKSPACE — tylko anuluj preview / tryb wyboru miejsca (NIGDY nie usuwa budynku)
       if (e.key === 'Backspace') {
         if (pending || pendingDisaster || roadFrom || (tool === 'build' && buildId)) {
           e.preventDefault();
           cancelPreviewOnly();
+          return;
+        }
+        if (tool === 'disaster' || mode === 'events') {
+          e.preventDefault();
+          setTool('select');
+          setMode(null);
+          setFocusTip(null);
+          setMsg((m) => ({ id: m.id + 1, text: 'Anulowano wybór miejsca.' }));
           return;
         }
         return;
@@ -484,6 +629,13 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         e.preventDefault();
         if (pending || pendingDisaster || roadFrom || buildId) {
           cancelPreviewOnly();
+          return;
+        }
+        if (tool === 'disaster' || mode === 'events') {
+          setTool('select');
+          setMode(null);
+          setFocusTip(null);
+          setMsg((m) => ({ id: m.id + 1, text: 'Anulowano wybór miejsca.' }));
           return;
         }
         cancelAll();
@@ -557,7 +709,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [
     act, buildId, cancelAll, cancelPreviewOnly, confirmDisaster, confirmPending,
-    fitCity, pending, pendingDisaster, roadFrom, sel, setWorkspaceMode, sim, tool,
+    fitCity, mode, pending, pendingDisaster, roadFrom, sel, setWorkspaceMode, sim, tool,
   ]);
 
   // Komunikaty z modelu katastrof
@@ -589,7 +741,7 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
   }, []);
 
   return (
-    <div className="app">
+    <div className={`app${tool === 'disaster' ? ' aiming-disaster' : ''}`}>
       <CityScene
         sim={sim}
         city={pipe.city}
@@ -609,7 +761,9 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         neoSelected={neoSelected}
         flyTo={flyTarget}
         disasterPreview={pendingDisaster ? { x: pendingDisaster.x, z: pendingDisaster.z, radius: pendingDisaster.radius } : null}
-        onSelect={(s) => { setSel(s); if (s) { setVehicle(null); setNeoSelected(false); } }}
+        disasterAiming={tool === 'disaster' && !pendingDisaster}
+        disasterAimLabel={DISASTERS[disaster].label}
+        onSelect={onMapSelect}
         onGround={onGround}
         onCommit={commitPlace}
         onFocusObject={(x, z) => goto(x, z, undefined, 'focus')}
@@ -625,6 +779,18 @@ function SimView({ city, pipe }: { city: CityData; pipe: PipelineSnapshot }) {
         }}
         onPickNeo={() => { setNeoSelected(true); setVehicle(null); setSel(null); }}
       />
+      {focusTip && (
+        <button
+          type="button"
+          className="focus-tip"
+          onClick={() => {
+            goto(focusTip.x, focusTip.z, undefined, 'focus');
+            setFocusTip(null);
+          }}
+        >
+          Pokaż zdarzenie · {focusTip.label}
+        </button>
+      )}
       <Hud
         sim={sim}
         city={pipe.city}

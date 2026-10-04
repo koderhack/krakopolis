@@ -48,6 +48,21 @@ export interface PlayerSnapshot {
   buildings: PlayerSnapshotBuilding[];
   parks: PlayerSnapshotPark[];
   budget: number;
+  disasters?: {
+    id: number;
+    kind: string;
+    cx: number;
+    cz: number;
+    intensity: number;
+    peak: number;
+    phase: string;
+    startedAt: number;
+    roads: number[];
+    label: string;
+    targetBuildingId?: number;
+    targetBuildingKind?: 'osm' | 'player';
+    targetLabel?: string;
+  }[];
 }
 
 export interface CityVersion {

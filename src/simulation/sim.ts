@@ -17,6 +17,7 @@ import {
   type DisasterKind, type DisasterState, type NewStop, type PlayerBuilding, type PlayerChange, type RoadClosure,
 } from './city/player';
 import { buildSpec, overlaps, type BuildId } from './city/catalog';
+import { estimateAffectedResidents, terrainRelativeHeight } from './city/population';
 import type { Origin } from '../data/types';
 import { BUDGET_INCOME_PER_SIM_SEC, COST_SCALE, START_BUDGET_PLN } from '../data/budget';
 
@@ -209,6 +210,7 @@ export class Sim {
   playerStops: NewStop[] = [];
   /** Aktywne katastrofy – SIMULATED. */
   disasters: DisasterState[] = [];
+  private nextDisasterId = 1;
   /** Historia odwracalnych decyzji gracza. */
   history = new PlayerHistory();
   /** Liczba zniszczonych odcinków (dla HUD). */
@@ -1359,13 +1361,22 @@ export class Sim {
   /**
    * Podgląd katastrofy bez zmiany stanu – do panelu Anuluj / Uruchom.
    */
-  previewDisaster(kind: DisasterKind, cx: number, cz: number): {
+  previewDisaster(kind: DisasterKind, cx: number, cz: number, target?: {
+    buildingId?: number;
+    buildingKind?: 'osm' | 'player';
+    label?: string;
+  }): {
     roads: number[];
     radius: number;
     label: string;
     cost: number;
     estimatedAffected: number;
     effects: typeof DISASTER_EFFECTS[DisasterKind];
+    cx: number;
+    cz: number;
+    targetBuildingId?: number;
+    targetBuildingKind?: 'osm' | 'player';
+    targetLabel?: string;
   } {
     const def = DISASTERS[kind];
     const hit = pickRoads(
@@ -1378,7 +1389,10 @@ export class Sim {
     for (const b of this.playerBuildings) {
       if (Math.hypot(b.x - cx, b.z - cz) <= def.radius) residents += b.residents;
     }
-    // Szacunek: gęstość z budynków OSM w promieniu (przybliżenie).
+    if (target?.buildingKind === 'player' && target.buildingId != null) {
+      const b = this.playerBuildings.find((p) => p.id === target.buildingId);
+      if (b) residents = Math.max(residents, b.residents);
+    }
     const estOsm = Math.round(def.radius * def.radius * 0.00035);
     return {
       roads,
@@ -1387,6 +1401,10 @@ export class Sim {
       cost: def.cost,
       estimatedAffected: residents + estOsm,
       effects: DISASTER_EFFECTS[kind],
+      cx, cz,
+      targetBuildingId: target?.buildingId,
+      targetBuildingKind: target?.buildingKind,
+      targetLabel: target?.label,
     };
   }
 
@@ -1460,35 +1478,58 @@ export class Sim {
 
   /* ------------------------------------------------------------ katastrofy */
 
-  /** Wywołuje katastrofę i od razu pokazuje jej skutki w modelu. */
-  triggerDisaster(kind: DisasterKind, cx: number, cz: number): string | null {
+  /** Wywołuje katastrofę w DOKŁADNYM punkcie (cx, cz) – kliknięcie użytkownika. */
+  triggerDisaster(
+    kind: DisasterKind,
+    cx: number,
+    cz: number,
+    target?: { buildingId?: number; buildingKind?: 'osm' | 'player'; label?: string },
+  ): string | null {
     const def = DISASTERS[kind];
     if (!this.spend(def.cost)) return 'Za mało środków w budżecie.';
 
+    // Snap do budynku, jeśli wskazany.
+    let sx = cx, sz = cz;
+    let targetLabel = target?.label;
+    if (target?.buildingKind === 'player' && target.buildingId != null) {
+      const b = this.playerBuildings.find((p) => p.id === target.buildingId);
+      if (b) { sx = b.x; sz = b.z; targetLabel = targetLabel ?? b.name; }
+    } else if (target?.buildingKind === 'osm' && target.buildingId != null) {
+      const b = this.city?.buildings[target.buildingId];
+      if (b) { sx = b.x; sz = b.z; targetLabel = targetLabel ?? (b.name || 'Budynek'); }
+    }
+
     const hit = pickRoads(
       this.roads.filter((r) => !r.built),
-      cx, cz, def.radius, def.count,
+      sx, sz, def.radius, def.count,
       (r) => !r.destroyed && r.edge.carAccess,
     );
     const roads = hit.map((r) => r.edge.id);
     const d: DisasterState = {
-      kind, roads, intensity: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
+      id: this.nextDisasterId++,
+      kind,
+      roads,
+      intensity: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
       peak: kind === 'fire' || kind === 'flood' ? 0.35 : 1,
       phase: kind === 'fire' || kind === 'flood' ? 'grow' : 'peak',
       startedAt: Date.now(),
-      label: def.label, cx, cz,
+      label: def.label,
+      cx: sx,
+      cz: sz,
+      targetBuildingId: target?.buildingId,
+      targetBuildingKind: target?.buildingKind,
+      targetLabel,
       lastNotice: kind === 'fire' ? 'Wykryto pożar.' : kind === 'flood' ? 'Wykryto zagrożenie powodziowe.' : `${def.label} — start.`,
     };
     this.pushNotice(d.lastNotice!);
     const apply = () => {
-      this.disasters.push(d);
+      if (!this.disasters.includes(d)) this.disasters.push(d);
       for (const id of roads) {
         const r = this.roads[id];
         if (!r) continue;
         if (kind === 'earthquake') { r.destroyed = true; r.closure = 'none'; }
-        else if (kind === 'fire') { r.closure = 'closed'; } // na początku zamknięcie, nie od razu zniszczenie
+        else if (kind === 'fire') { r.closure = 'closed'; }
         else if (kind === 'flood' || kind === 'rain') { r.closure = 'closed'; }
-        else if (kind === 'blackout' || kind === 'heat') { /* spowolnienie przez disasterMood */ }
       }
       this.destroyedCount = this.roads.filter((r) => r.destroyed).length;
       this.invalidateRouting();
@@ -1507,10 +1548,12 @@ export class Sim {
       this.reroute();
     };
     apply();
+    const where = targetLabel ? ` · ${targetLabel}` : '';
     this.history.push({
-      label: `${def.label} – ${roads.length} odcinków`,
+      label: `${def.label}${where} @ ${sx.toFixed(0)},${sz.toFixed(0)}`,
       at: Date.now(), apply, revert,
     });
+    this.version++;
     return null;
   }
 
@@ -1593,11 +1636,13 @@ export class Sim {
     this.disasterMood = p;
   }
 
-  /** Dołącz 1–2 sąsiednie odcinki do pożaru (bez czystego randomu – najbliższe). */
+  /** Dołącz 1–2 sąsiednie odcinki do pożaru – od epicentrum d.cx/d.cz. */
   private spreadFire(d: DisasterState) {
-    if (d.cx == null || d.cz == null) return;
     const candidates = this.roads
-      .map((r, id) => ({ id, r, dist: Math.hypot(((r.edge.ax + r.edge.bx) / 2) - d.cx!, ((r.edge.az + r.edge.bz) / 2) - d.cz!) }))
+      .map((r, id) => ({
+        id, r,
+        dist: Math.hypot(((r.edge.ax + r.edge.bx) / 2) - d.cx, ((r.edge.az + r.edge.bz) / 2) - d.cz),
+      }))
       .filter((x) => x.r.edge.carAccess && !x.r.destroyed && !d.roads.includes(x.id) && x.dist < (DISASTERS.fire.radius * 1.35))
       .sort((a, b) => a.dist - b.dist)
       .slice(0, 2);
@@ -1637,6 +1682,7 @@ export class Sim {
     budget: number;
     residents: number;
     jobs: number;
+    disasters: DisasterState[];
   } {
     return {
       buildings: this.playerBuildings.map((b) => ({ ...b })),
@@ -1644,6 +1690,7 @@ export class Sim {
       budget: this.m.budget,
       residents: this.playerBuildings.reduce((s, b) => s + b.residents, 0),
       jobs: this.playerBuildings.reduce((s, b) => s + b.jobs, 0),
+      disasters: this.disasters.map((d) => ({ ...d, roads: [...d.roads] })),
     };
   }
 
@@ -1652,11 +1699,26 @@ export class Sim {
     buildings: PlayerBuilding[];
     parks: Park[];
     budget: number;
+    disasters?: DisasterState[];
   }) {
     this.playerBuildings = snap.buildings.map((b, i) => ({ ...b, id: i }));
     this.parks = snap.parks.map((p) => ({ ...p }));
     this.m.budget = snap.budget;
     this.history = new PlayerHistory();
+    this.disasters = (snap.disasters ?? [])
+      .filter((d) => d.intensity > 0.05)
+      .map((d) => ({
+        ...d,
+        id: d.id ?? this.nextDisasterId++,
+        cx: d.cx,
+        cz: d.cz,
+        roads: [...(d.roads ?? [])],
+        peak: d.peak ?? d.intensity,
+        phase: d.phase ?? 'peak',
+      }));
+    if (this.disasters.length) {
+      this.nextDisasterId = Math.max(this.nextDisasterId, ...this.disasters.map((d) => d.id + 1));
+    }
     this.reweight();
     this.invalidateRouting();
     this.reroute();

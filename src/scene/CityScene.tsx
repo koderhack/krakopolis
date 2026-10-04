@@ -42,6 +42,9 @@ export interface CitySceneProps {
   neoSelected?: boolean;
   flyTo: FlyTarget | null;
   disasterPreview?: { x: number; z: number; radius: number } | null;
+  /** Tryb celowania katastrofy – podgląd pod kursorem. */
+  disasterAiming?: boolean;
+  disasterAimLabel?: string;
   onSelect: (s: Sel) => void;
   onGround: (x: number, z: number) => void;
   onCommit: (x: number, z: number, x2: number, z2: number) => void;
@@ -413,6 +416,105 @@ function DisasterGhost({ preview }: { preview: { x: number; z: number; radius: n
   );
 }
 
+/** Marker pod kursorem w trybie „Wybierz miejsce” – nie przechwytuje kliknięć budynków. */
+function DisasterAim({
+  active, label, onPick,
+}: {
+  active: boolean;
+  label: string;
+  onPick: (x: number, z: number) => void;
+}) {
+  const ring = useRef<THREE.Mesh>(null);
+  const disc = useRef<THREE.Mesh>(null);
+  const labelRef = useRef<HTMLDivElement | null>(null);
+  const { gl, camera } = useThree();
+  const pt = useRef({ x: 0, z: 0, visible: false });
+  const scratch = useMemo(() => new THREE.Vector3(), []);
+
+  useEffect(() => {
+    if (!active) {
+      labelRef.current?.remove();
+      labelRef.current = null;
+      return;
+    }
+    const parent = gl.domElement.parentElement;
+    if (!parent) return;
+    const el = document.createElement('div');
+    el.className = 'disaster-aim-lbl';
+    el.textContent = label;
+    parent.appendChild(el);
+    labelRef.current = el;
+    return () => {
+      el.remove();
+      labelRef.current = null;
+    };
+  }, [active, label, gl]);
+
+  useFrame(() => {
+    const r = ring.current;
+    const d = disc.current;
+    const lbl = labelRef.current;
+    if (!active || !pt.current.visible) {
+      if (r) r.visible = false;
+      if (d) d.visible = false;
+      if (lbl) lbl.style.display = 'none';
+      return;
+    }
+    const { x, z } = pt.current;
+    const y = 0.35;
+    if (r) {
+      r.visible = true;
+      r.position.set(x, y, z);
+    }
+    if (d) {
+      d.visible = true;
+      d.position.set(x, y + 0.02, z);
+    }
+    if (lbl) {
+      scratch.set(x, y + 8, z);
+      scratch.project(camera);
+      const nx = (scratch.x * 0.5 + 0.5) * gl.domElement.clientWidth;
+      const ny = (-scratch.y * 0.5 + 0.5) * gl.domElement.clientHeight;
+      lbl.style.display = 'block';
+      lbl.style.transform = `translate(${nx}px, ${ny}px) translate(-50%, -120%)`;
+    }
+  });
+
+  if (!active) return null;
+
+  const track = (e: import('@react-three/fiber').ThreeEvent<PointerEvent>) => {
+    pt.current = { x: e.point.x, z: e.point.z, visible: true };
+  };
+  const pick = (e: import('@react-three/fiber').ThreeEvent<MouseEvent>) => {
+    e.stopPropagation();
+    if (e.delta > 4) return;
+    onPick(e.point.x, e.point.z);
+  };
+
+  return (
+    <group>
+      <mesh ref={disc} rotation-x={-Math.PI / 2} visible={false}>
+        <circleGeometry args={[5, 28]} />
+        <meshBasicMaterial color="#ff5a30" transparent opacity={0.35} depthWrite={false} />
+      </mesh>
+      <mesh ref={ring} rotation-x={-Math.PI / 2} visible={false}>
+        <ringGeometry args={[5.5, 7.5, 32]} />
+        <meshBasicMaterial color="#ff7a40" transparent opacity={0.75} side={THREE.DoubleSide} depthWrite={false} />
+      </mesh>
+      {/* Płaszczyzna śledzenia – pod budynkami; klik w budynek idzie osobno przez onSelect */}
+      <mesh
+        rotation-x={-Math.PI / 2}
+        position={[0, 0.12, 0]}
+        onPointerMove={track}
+        onClick={pick}
+      >
+        <planeGeometry args={[8000, 8000]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+    </group>
+  );
+}
+
 /**
  * Etykiety miejsc – lekki overlay DOM (nie 90× drei Html).
  * Max kilka najbliższych, tylko przy zbliżeniu; aktualizacja throttlowana.
@@ -629,7 +731,13 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
         <WindowLights key={`win-${staticKey}-${hiddenKey}`} buildings={city.buildings} hiddenKey={hiddenKey} sim={sim} />
       )}
       <RoadNetwork key={`roads-${staticKey}`} sim={sim} ver={p.ver} sel={p.sel?.kind === 'road' ? p.sel.id : null}
-        view={p.trafficView} layers={p.layers} onSelect={(id) => p.onSelect({ kind: 'road', id })} />
+        view={p.trafficView} layers={p.layers}
+        onSelect={(id) => {
+          if (p.disasterAiming) return;
+          p.onSelect({ kind: 'road', id });
+        }}
+        onDisasterPick={p.disasterAiming ? (x, z) => p.onGround(x, z) : undefined}
+      />
       {p.layers.has('roads') && <StreetLamps key={`lamps-${staticKey}`} sim={sim} ver={p.ver} />}
       {p.layers.has('transit') && <TransitStops key={`stops-${staticKey}`} stops={city.stops} ver={p.ver} />}
       <PlayerParks parks={sim.parks} ver={p.ver} />
@@ -661,6 +769,11 @@ export const CityScene = memo(function CityScene(p: CitySceneProps) {
       {p.layers.has('labels') && <Labels key={`labels-${staticKey}`} city={city} ver={p.ver} />}
       <Ghost kind={p.placeKind} buildId={p.buildId} roadFrom={p.roadFrom} onCommit={p.onCommit} rot={p.buildRot} pendingPose={p.pendingPose} sim={sim} />
       <DisasterGhost preview={p.disasterPreview ?? null} />
+      <DisasterAim
+        active={!!p.disasterAiming}
+        label={p.disasterAimLabel ?? 'Zdarzenie'}
+        onPick={(x, z) => p.onGround(x, z)}
+      />
       {p.layers.has('buildings') && <LandmarkExtras buildings={city.buildings} />}
     </Canvas>
   );
